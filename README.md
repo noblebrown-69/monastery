@@ -4,7 +4,7 @@
 
 Built for Linux (Ubuntu/Mint) with a warm sepia parchment aesthetic. Single executable. Zero bloat. Lives in Dropbox and runs anywhere.
 
-![Monastery Screenshot](https://github.com/noblebrown-69/monastery/raw/main/screenshot.png)
+![Monastery Screenshot](https://github.com/noblebrown-69/monastery/raw/main/screenshot1.1.png)
 
 ## Features
 
@@ -19,6 +19,8 @@ Built for Linux (Ubuntu/Mint) with a warm sepia parchment aesthetic. Single exec
 - Modular `MonasteryEditor` widget — ready to drop into Aureus later
 - Single-file AppImage or tiny executable — truly portable
 
+(icons courtesy pictranoosa and Freepik via flaticon.com)
+
 ## Download (Recommended)
 
 Download the latest `Monastery.AppImage` from the [Releases page](https://github.com/noblebrown-69/monastery/releases).
@@ -26,3 +28,5 @@ Download the latest `Monastery.AppImage` from the [Releases page](https://github
 ```bash
 chmod +x Monastery.AppImage
 ./Monastery.AppImage
+
+
