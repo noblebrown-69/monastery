@@ -19,6 +19,8 @@ qt_add_executable(Monastery
     MonasteryEditor.cpp
 )
 
+target_sources(Monastery PRIVATE resources.qrc)
+
 target_link_libraries(Monastery PRIVATE Qt6::Core Qt6::Widgets Qt6::PrintSupport)
 
 set_target_properties(Monastery PROPERTIES

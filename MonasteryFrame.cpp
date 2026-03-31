@@ -27,6 +27,8 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QVBoxLayout>
+#include <QFileInfo>
+#include <QPainter>
 
 // Member variables
 QWidget *m_titleBar;
@@ -60,7 +62,7 @@ QAction *m_pageBreakAction;
 static const char *bold_xpm[] = {
 "16 16 3 1",
 "  c None",
-". c Black",
+". c None",
 "B c Black",
 "BBBB............",
 "B...B...........",
@@ -77,13 +79,13 @@ static const char *bold_xpm[] = {
 "................",
 "................",
 "................",
-nullptr
+"................","................",nullptr
 };
 
 static const char *italic_xpm[] = {
 "16 16 3 1",
 "  c None",
-". c Black",
+". c None",
 "I c Black",
 "........I.......",
 ".........I......",
@@ -107,7 +109,7 @@ nullptr
 static const char *underline_xpm[] = {
 "16 16 3 1",
 "  c None",
-". c Black",
+". c None",
 "U c Black",
 "................",
 "................",
@@ -131,7 +133,7 @@ nullptr
 static const char *alignleft_xpm[] = {
 "16 16 3 1",
 "  c None",
-". c Black",
+". c None",
 "L c Black",
 "   L............",
 "  L.............",
@@ -155,7 +157,7 @@ nullptr
 static const char *aligncenter_xpm[] = {
 "16 16 3 1",
 "  c None",
-". c Black",
+". c None",
 "C c Black",
 "................",
 "................",
@@ -179,7 +181,7 @@ nullptr
 static const char *alignright_xpm[] = {
 "16 16 3 1",
 "  c None",
-". c Black",
+". c None",
 "R c Black",
 "............R   ",
 ".............R  ",
@@ -203,7 +205,7 @@ nullptr
 static const char *justify_xpm[] = {
 "16 16 3 1",
 "  c None",
-". c Black",
+". c None",
 "J c Black",
 "................",
 "................",
@@ -227,7 +229,7 @@ nullptr
 static const char *bullet_xpm[] = {
 "16 16 3 1",
 "  c None",
-". c Black",
+". c None",
 "o c Black",
 "................",
 "................",
@@ -251,7 +253,7 @@ nullptr
 static const char *number_xpm[] = {
 "16 16 3 1",
 "  c None",
-". c Black",
+". c None",
 "1 c Black",
 "................",
 "................",
@@ -291,12 +293,6 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
     m_titleBar->setFixedHeight(30);
     QHBoxLayout *titleLayout = new QHBoxLayout(m_titleBar);
     titleLayout->setContentsMargins(10,0,10,0);
-    QLabel *titleLabel = new QLabel("Monastery");
-    titleLabel->setFont(QFont("Noto Serif", 12));
-    titleLabel->setStyleSheet("color: white;");
-    titleLayout->addStretch();
-    titleLayout->addWidget(titleLabel);
-    titleLayout->addStretch();
     QPushButton *minBtn = new QPushButton("—");
     minBtn->setFixedSize(30,30);
     minBtn->setStyleSheet("border: none; background: transparent; color: white;");
@@ -304,11 +300,33 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
     QPushButton *maxBtn = new QPushButton("□");
     maxBtn->setFixedSize(30,30);
     maxBtn->setStyleSheet("border: none; background: transparent; color: white;");
-    connect(maxBtn, &QPushButton::clicked, this, [this]() { if (isMaximized()) showNormal(); else showMaximized(); });
+    connect(maxBtn, &QPushButton::clicked, this, [this]() {
+        if (isMaximized()) {
+            showNormal();
+            setGeometry(m_normalGeometry);
+        } else {
+            m_normalGeometry = geometry();
+            showMaximized();
+        }
+    });
     QPushButton *closeBtn = new QPushButton("×");
     closeBtn->setFixedSize(30,30);
     closeBtn->setStyleSheet("border: none; background: transparent; color: white;");
     connect(closeBtn, &QPushButton::clicked, this, &QWidget::close);
+    // titleLabel - perfectly centered with invisible balancing spacer
+    QLabel *titleLabel = new QLabel("Monastery");
+    QFont titleFont("Noto Serif", 11, QFont::Bold);
+    titleLabel->setFont(titleFont);
+    titleLabel->setStyleSheet("color: #1C1C1C;");
+
+    // Invisible spacer on left to perfectly balance the three 30px buttons on the right
+    QWidget *leftSpacer = new QWidget();
+    leftSpacer->setFixedWidth(90);   // 3 buttons × 30px
+
+    titleLayout->addWidget(leftSpacer);
+    titleLayout->addStretch();
+    titleLayout->addWidget(titleLabel);
+    titleLayout->addStretch();
     titleLayout->addWidget(minBtn);
     titleLayout->addWidget(maxBtn);
     titleLayout->addWidget(closeBtn);
@@ -337,15 +355,15 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
     m_toolBar->setIconSize(QSize(16, 16));
     m_toolBar->setStyleSheet("QToolBar { background-color: #D2B48C; }");
     // Set icons
-    m_boldAction->setIcon(QIcon::fromTheme("format-text-bold"));
-    m_italicAction->setIcon(QIcon::fromTheme("format-text-italic"));
-    m_underlineAction->setIcon(QIcon::fromTheme("format-text-underline"));
-    m_alignLeftAction->setIcon(QIcon::fromTheme("format-justify-left"));
-    m_alignCenterAction->setIcon(QIcon::fromTheme("format-justify-center"));
-    m_alignRightAction->setIcon(QIcon::fromTheme("format-justify-right"));
-    m_justifyAction->setIcon(QIcon::fromTheme("format-justify-fill"));
-    m_bulletAction->setIcon(QIcon::fromTheme("format-list-unordered"));
-    m_numberAction->setIcon(QIcon::fromTheme("format-list-ordered"));
+    m_boldAction->setIcon(QIcon(":/icons/bold.png"));
+    m_italicAction->setIcon(QIcon(":/icons/italic.png"));
+    m_underlineAction->setIcon(QIcon(":/icons/underline.png"));
+    m_alignLeftAction->setIcon(QIcon(":/icons/alignleft.png"));
+    m_alignCenterAction->setIcon(QIcon(":/icons/aligncenter.png"));
+    m_alignRightAction->setIcon(QIcon(":/icons/alignright.png"));
+    m_justifyAction->setIcon(QIcon(":/icons/justify.png"));
+    m_bulletAction->setIcon(QIcon(":/icons/bullet.png"));
+    m_numberAction->setIcon(QIcon(":/icons/numbered.png"));
     m_toolBar->addAction(m_newAction);
     m_toolBar->addAction(m_openAction);
     m_toolBar->addAction(m_saveAction);
@@ -385,12 +403,18 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
     mainLayout->addWidget(m_statusBar);
 
     setLayout(mainLayout);
+    setWindowIcon(QIcon(":/icons/monastery.png"));
+
+    setMinimumSize(680, 460);  // lets us shrink freely while keeping UI usable
+    m_normalGeometry = geometry();
 
     m_autoSaveTimer = new QTimer(this);
     connect(m_autoSaveTimer, &QTimer::timeout, this, &MonasteryFrame::onAutoSave);
     m_autoSaveTimer->start(30000);  // 30 seconds
 
     connect(m_editor->textEdit(), &QTextEdit::textChanged, this, &MonasteryFrame::updateWordCount);
+    connect(m_undoAction, &QAction::triggered, m_editor->textEdit(), &QTextEdit::undo);
+    connect(m_redoAction, &QAction::triggered, m_editor->textEdit(), &QTextEdit::redo);
 
     m_statusBar->showMessage("Ready");
     updateWordCount();
@@ -400,24 +424,33 @@ MonasteryFrame::~MonasteryFrame() {
     // Qt handles cleanup
 }
 
+QString MonasteryFrame::getRealAppDir() {
+    QByteArray appImage = qgetenv("APPIMAGE");
+    if (!appImage.isEmpty()) {
+        return QFileInfo(QString::fromUtf8(appImage)).absolutePath();
+    } else {
+        return QApplication::applicationDirPath();
+    }
+}
+
 void MonasteryFrame::createDocsFolder() {
-    m_docsDir = QApplication::applicationDirPath() + "/Docs";
+    m_docsDir = getRealAppDir() + "/Docs";
     QDir().mkpath(m_docsDir);
 }
 
 void MonasteryFrame::createActions() {
     m_newAction = new QAction("&New", this);
-    m_newAction->setIcon(QIcon::fromTheme("document-new"));
+    m_newAction->setIcon(QIcon(":/icons/new.png"));
     m_newAction->setShortcut(QKeySequence::New);
     connect(m_newAction, &QAction::triggered, this, &MonasteryFrame::onNew);
 
     m_openAction = new QAction("&Open", this);
-    m_openAction->setIcon(QIcon::fromTheme("document-open"));
+    m_openAction->setIcon(QIcon(":/icons/open.png"));
     m_openAction->setShortcut(QKeySequence::Open);
     connect(m_openAction, &QAction::triggered, this, &MonasteryFrame::onOpen);
 
     m_saveAction = new QAction("&Save", this);
-    m_saveAction->setIcon(QIcon::fromTheme("document-save"));
+    m_saveAction->setIcon(QIcon(":/icons/save.png"));
     m_saveAction->setShortcut(QKeySequence::Save);
     connect(m_saveAction, &QAction::triggered, this, &MonasteryFrame::onSave);
 
@@ -429,69 +462,66 @@ void MonasteryFrame::createActions() {
     m_exitAction->setShortcut(QKeySequence::Quit);
     connect(m_exitAction, &QAction::triggered, this, &MonasteryFrame::onExit);
 
-    m_boldAction = new QAction("B", this);
+    m_boldAction = new QAction(this);
     m_boldAction->setCheckable(true);
     m_boldAction->setToolTip("Bold");
+    m_boldAction->setShortcut(QKeySequence("Ctrl+B"));
     connect(m_boldAction, &QAction::triggered, this, &MonasteryFrame::onBold);
 
-    m_italicAction = new QAction("I", this);
+    m_italicAction = new QAction(this);
     m_italicAction->setCheckable(true);
     m_italicAction->setToolTip("Italic");
+    m_italicAction->setShortcut(QKeySequence("Ctrl+I"));
     connect(m_italicAction, &QAction::triggered, this, &MonasteryFrame::onItalic);
 
-    m_underlineAction = new QAction("U", this);
+    m_underlineAction = new QAction(this);
     m_underlineAction->setCheckable(true);
     m_underlineAction->setToolTip("Underline");
+    m_underlineAction->setShortcut(QKeySequence("Ctrl+U"));
     connect(m_underlineAction, &QAction::triggered, this, &MonasteryFrame::onUnderline);
 
     QActionGroup *alignGroup = new QActionGroup(this);
-    m_alignLeftAction = new QAction("L", this);
+
+    m_alignLeftAction = new QAction(this);
     m_alignLeftAction->setCheckable(true);
     m_alignLeftAction->setToolTip("Align Left");
     connect(m_alignLeftAction, &QAction::triggered, this, &MonasteryFrame::onAlignLeft);
     alignGroup->addAction(m_alignLeftAction);
 
-    m_alignCenterAction = new QAction("C", this);
+    m_alignCenterAction = new QAction(this);
     m_alignCenterAction->setCheckable(true);
     m_alignCenterAction->setToolTip("Align Center");
     connect(m_alignCenterAction, &QAction::triggered, this, &MonasteryFrame::onAlignCenter);
     alignGroup->addAction(m_alignCenterAction);
 
-    m_alignRightAction = new QAction("R", this);
+    m_alignRightAction = new QAction(this);
     m_alignRightAction->setCheckable(true);
     m_alignRightAction->setToolTip("Align Right");
     connect(m_alignRightAction, &QAction::triggered, this, &MonasteryFrame::onAlignRight);
     alignGroup->addAction(m_alignRightAction);
 
-    m_justifyAction = new QAction("J", this);
+    m_justifyAction = new QAction(this);
     m_justifyAction->setCheckable(true);
     m_justifyAction->setToolTip("Justify");
     connect(m_justifyAction, &QAction::triggered, this, &MonasteryFrame::onJustify);
     alignGroup->addAction(m_justifyAction);
 
-    m_bulletAction = new QAction("BL", this);
+    m_bulletAction = new QAction(this);
     m_bulletAction->setToolTip("Bulleted List");
     connect(m_bulletAction, &QAction::triggered, this, &MonasteryFrame::onBulletList);
 
-    m_numberAction = new QAction("NL", this);
+    m_numberAction = new QAction(this);
     m_numberAction->setToolTip("Numbered List");
     connect(m_numberAction, &QAction::triggered, this, &MonasteryFrame::onNumberedList);
 
     m_undoAction = new QAction("Undo", this);
     m_undoAction->setShortcut(QKeySequence::Undo);
-    connect(m_undoAction, &QAction::triggered, m_editor->textEdit(), &QTextEdit::undo);
 
     m_redoAction = new QAction("Redo", this);
     m_redoAction->setShortcut(QKeySequence::Redo);
-    connect(m_redoAction, &QAction::triggered, m_editor->textEdit(), &QTextEdit::redo);
 
     m_pageBreakAction = new QAction("Insert Page &Break", this);
     connect(m_pageBreakAction, &QAction::triggered, this, &MonasteryFrame::onInsertPageBreak);
-
-    // Set shortcuts
-    m_boldAction->setShortcut(QKeySequence("Ctrl+B"));
-    m_italicAction->setShortcut(QKeySequence("Ctrl+I"));
-    m_underlineAction->setShortcut(QKeySequence("Ctrl+U"));
 }
 
 void MonasteryFrame::createMenus() {
@@ -675,7 +705,13 @@ void MonasteryFrame::mouseReleaseEvent(QMouseEvent *event) {
 
 void MonasteryFrame::mouseDoubleClickEvent(QMouseEvent *event) {
     if (m_titleBar->geometry().contains(event->pos())) {
-        if (isMaximized()) showNormal(); else showMaximized();
+        if (isMaximized()) {
+            showNormal();
+            setGeometry(m_normalGeometry);
+        } else {
+            m_normalGeometry = geometry();
+            showMaximized();
+        }
     } else {
         QWidget::mouseDoubleClickEvent(event);
     }
@@ -684,4 +720,14 @@ void MonasteryFrame::mouseDoubleClickEvent(QMouseEvent *event) {
 void MonasteryFrame::resizeEvent(QResizeEvent *event) {
     m_titleBar->setFixedWidth(width());
     QWidget::resizeEvent(event);
+}
+
+QIcon MonasteryFrame::createToolbarIcon(const QString &symbol) {
+    QPixmap pix(16, 16);
+    pix.fill(Qt::transparent);
+    QPainter p(&pix);
+    p.setPen(QColor(40, 40, 40));
+    p.setFont(QFont("Noto Sans", 11, QFont::Bold));
+    p.drawText(pix.rect(), Qt::AlignCenter, symbol);
+    return QIcon(pix);
 }

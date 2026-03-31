@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Monastery
+Comment=Classic word processor with parchment aesthetic
+Exec=Monastery
+Icon=monastery
+Categories=Office;WordProcessor;TextEditor;
+Terminal=false

@@ -50,10 +50,13 @@ private:
     void createToolBar();
     void createStatusBar();
     void createDocsFolder();
+    QString getRealAppDir();
+    QIcon createToolbarIcon(const QString &symbol);
 
     MonasteryEditor *m_editor;
     QTimer *m_autoSaveTimer;
     QString m_docsDir;
+    QRect m_normalGeometry;
 
     // Actions
     QAction *m_newAction;
