@@ -5,6 +5,7 @@
 #include <QTimer>
 #include <QMouseEvent>
 #include <QResizeEvent>
+#include <QLabel>
 
 class MonasteryEditor;
 
@@ -14,6 +15,7 @@ class MonasteryFrame : public QWidget {
 public:
     MonasteryFrame(QWidget *parent = nullptr);
     ~MonasteryFrame();
+    static QString getRealAppDir();
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -27,6 +29,7 @@ private slots:
     void onNew();
     void onOpen();
     void onSave();
+    void onSaveAs();
     void onExit();
     void onAutoSave();
     void onBold();
@@ -50,18 +53,19 @@ private:
     void createToolBar();
     void createStatusBar();
     void createDocsFolder();
-    QString getRealAppDir();
     QIcon createToolbarIcon(const QString &symbol);
 
     MonasteryEditor *m_editor;
     QTimer *m_autoSaveTimer;
     QString m_docsDir;
+    QString m_currentFilePath;
     QRect m_normalGeometry;
 
     // Actions
     QAction *m_newAction;
     QAction *m_openAction;
     QAction *m_saveAction;
+    QAction *m_saveAsAction;
     QAction *m_printAction;
     QAction *m_exitAction;
     QAction *m_boldAction;
@@ -76,6 +80,7 @@ private:
     QAction *m_pageBreakAction;
     QAction *m_undoAction;
     QAction *m_redoAction;
+    QLabel *m_wordCountLabel;
 };
 
 #endif // MONASTERYFRAME_H

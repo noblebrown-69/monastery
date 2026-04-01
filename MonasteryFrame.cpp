@@ -280,6 +280,7 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
     setGeometry(100, 100, 800, 600);
 
     createDocsFolder();
+    m_currentFilePath.clear();
 
     createActions();
 
@@ -287,12 +288,13 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
     mainLayout->setContentsMargins(0,0,0,0);
     mainLayout->setSpacing(0);
 
-    // titleBar
+    // titleBar - darker brown like Aureus
     m_titleBar = new QWidget;
-    m_titleBar->setStyleSheet("background-color: #A67B5B;");
+    m_titleBar->setStyleSheet("background-color: #6B4423;");
     m_titleBar->setFixedHeight(30);
     QHBoxLayout *titleLayout = new QHBoxLayout(m_titleBar);
     titleLayout->setContentsMargins(10,0,10,0);
+
     QPushButton *minBtn = new QPushButton("—");
     minBtn->setFixedSize(30,30);
     minBtn->setStyleSheet("border: none; background: transparent; color: white;");
@@ -313,15 +315,14 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
     closeBtn->setFixedSize(30,30);
     closeBtn->setStyleSheet("border: none; background: transparent; color: white;");
     connect(closeBtn, &QPushButton::clicked, this, &QWidget::close);
-    // titleLabel - perfectly centered with invisible balancing spacer
-    QLabel *titleLabel = new QLabel("Monastery");
-    QFont titleFont("Noto Serif", 11, QFont::Bold);
-    titleLabel->setFont(titleFont);
-    titleLabel->setStyleSheet("color: #1C1C1C;");
 
-    // Invisible spacer on left to perfectly balance the three 30px buttons on the right
+    QLabel *titleLabel = new QLabel("Monastery");
+    QFont titleFont("Noto Serif", 10, QFont::Bold);
+    titleLabel->setFont(titleFont);
+    titleLabel->setStyleSheet("color: #E8D9B5;");
+
     QWidget *leftSpacer = new QWidget();
-    leftSpacer->setFixedWidth(90);   // 3 buttons × 30px
+    leftSpacer->setFixedWidth(90);
 
     titleLayout->addWidget(leftSpacer);
     titleLayout->addStretch();
@@ -339,6 +340,7 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
     fileMenu->addAction(m_newAction);
     fileMenu->addAction(m_openAction);
     fileMenu->addAction(m_saveAction);
+    fileMenu->addAction(m_saveAsAction);
     fileMenu->addAction(m_printAction);
     fileMenu->addSeparator();
     fileMenu->addAction(m_exitAction);
@@ -395,11 +397,17 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
     m_editor = new MonasteryEditor(this);
     mainLayout->addWidget(m_editor, 1);
 
-    // statusBar
+    // statusBar - darker brown + permanent word count on right
     m_statusBar = new QStatusBar;
     m_statusBar->setSizeGripEnabled(true);
-    m_statusBar->setStyleSheet("background-color: #A67B5B;");
+    m_statusBar->setStyleSheet("background-color: #6B4423; color: #F5E8C7;");
     m_statusBar->setFont(QFont("Noto Serif", 8));
+
+    // Permanent word count label on the right (always visible)
+    m_wordCountLabel = new QLabel("Words: 0");
+    m_wordCountLabel->setAlignment(Qt::AlignRight);
+    m_statusBar->addPermanentWidget(m_wordCountLabel);
+
     mainLayout->addWidget(m_statusBar);
 
     setLayout(mainLayout);
@@ -453,6 +461,11 @@ void MonasteryFrame::createActions() {
     m_saveAction->setIcon(QIcon(":/icons/save.png"));
     m_saveAction->setShortcut(QKeySequence::Save);
     connect(m_saveAction, &QAction::triggered, this, &MonasteryFrame::onSave);
+
+    m_saveAsAction = new QAction("Save &As...", this);
+    m_saveAsAction->setIcon(QIcon::fromTheme("document-save-as"));
+    m_saveAsAction->setShortcut(QKeySequence::SaveAs);
+    connect(m_saveAsAction, &QAction::triggered, this, &MonasteryFrame::onSaveAs);
 
     m_printAction = new QAction("&Print", this);
     m_printAction->setShortcut(QKeySequence::Print);
@@ -545,6 +558,7 @@ void MonasteryFrame::onNew() {
     }
     m_editor->textEdit()->clear();
     m_editor->textEdit()->document()->setModified(false);
+    m_currentFilePath.clear();
     m_statusBar->showMessage("New document created");
 }
 
@@ -557,22 +571,22 @@ void MonasteryFrame::onOpen() {
         QString html = QString::fromUtf8(file.readAll());
         m_editor->textEdit()->setHtml(html);
         m_editor->textEdit()->document()->setModified(false);
+        m_currentFilePath = fileName;
         m_statusBar->showMessage("File opened: " + fileName);
     }
 }
 
 void MonasteryFrame::onSave() {
-    QString fileName = QFileDialog::getSaveFileName(this, "Save HTML", m_docsDir, "HTML files (*.html)");
-    if (fileName.isEmpty()) return;
-
-    if (!fileName.endsWith(".html")) fileName += ".html";
-
-    QFile file(fileName);
+    if (m_currentFilePath.isEmpty() || m_currentFilePath.contains("Monastery_AutoSave.html")) {
+        onSaveAs();
+        return;
+    }
+    QFile file(m_currentFilePath);
     if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
         QTextStream out(&file);
         out << m_editor->textEdit()->toHtml();
         m_editor->textEdit()->document()->setModified(false);
-        m_statusBar->showMessage("Saved to " + fileName);
+        m_statusBar->showMessage("Saved to " + m_currentFilePath);
     }
 }
 
@@ -599,7 +613,9 @@ void MonasteryFrame::onPrint() {
 }
 
 void MonasteryFrame::onInsertPageBreak() {
-    m_editor->textEdit()->textCursor().insertHtml("<hr>");
+    QTextCursor cursor = m_editor->textEdit()->textCursor();
+    cursor.insertHtml("<hr style=\"border: 1px dashed #666;\">");
+    m_editor->textEdit()->setTextCursor(cursor);
 }
 
 void MonasteryFrame::onBold() {
@@ -663,7 +679,7 @@ void MonasteryFrame::onSizeChanged(const QString &size) {
 void MonasteryFrame::updateWordCount() {
     QString text = m_editor->textEdit()->toPlainText();
     QStringList words = text.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
-    m_statusBar->showMessage(QString("Words: %1").arg(words.count()));
+    m_wordCountLabel->setText(QString("Words: %1").arg(words.count()));
 }
 
 void MonasteryFrame::closeEvent(QCloseEvent *event) {
@@ -682,7 +698,7 @@ void MonasteryFrame::closeEvent(QCloseEvent *event) {
 void MonasteryFrame::mousePressEvent(QMouseEvent *event) {
     if (event->button() == Qt::LeftButton && m_titleBar->geometry().contains(event->pos())) {
         m_dragging = true;
-        m_dragPosition = event->globalPos() - frameGeometry().topLeft();
+        m_dragPosition = event->globalPosition().toPoint() - frameGeometry().topLeft();
         event->accept();
     } else {
         QWidget::mousePressEvent(event);
@@ -691,7 +707,7 @@ void MonasteryFrame::mousePressEvent(QMouseEvent *event) {
 
 void MonasteryFrame::mouseMoveEvent(QMouseEvent *event) {
     if (m_dragging) {
-        move(event->globalPos() - m_dragPosition);
+        move(event->globalPosition().toPoint() - m_dragPosition);
         event->accept();
     } else {
         QWidget::mouseMoveEvent(event);
@@ -720,6 +736,20 @@ void MonasteryFrame::mouseDoubleClickEvent(QMouseEvent *event) {
 void MonasteryFrame::resizeEvent(QResizeEvent *event) {
     m_titleBar->setFixedWidth(width());
     QWidget::resizeEvent(event);
+}
+
+void MonasteryFrame::onSaveAs() {
+    QString fileName = QFileDialog::getSaveFileName(this, "Save HTML", m_docsDir, "HTML files (*.html)");
+    if (fileName.isEmpty()) return;
+    if (!fileName.endsWith(".html")) fileName += ".html";
+    m_currentFilePath = fileName;
+    QFile file(fileName);
+    if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QTextStream out(&file);
+        out << m_editor->textEdit()->toHtml();
+        m_editor->textEdit()->document()->setModified(false);
+        m_statusBar->showMessage("Saved to " + fileName);
+    }
 }
 
 QIcon MonasteryFrame::createToolbarIcon(const QString &symbol) {

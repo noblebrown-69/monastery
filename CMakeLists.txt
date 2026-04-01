@@ -11,6 +11,11 @@ set(CMAKE_AUTOUIC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets PrintSupport)
 
+find_path(HUNSPELL_INCLUDE_DIR hunspell/hunspell.h)
+find_library(HUNSPELL_LIBRARY hunspell-1.7)
+
+include_directories(${HUNSPELL_INCLUDE_DIR})
+
 qt_standard_project_setup()
 
 qt_add_executable(Monastery
@@ -21,7 +26,7 @@ qt_add_executable(Monastery
 
 target_sources(Monastery PRIVATE resources.qrc)
 
-target_link_libraries(Monastery PRIVATE Qt6::Core Qt6::Widgets Qt6::PrintSupport)
+target_link_libraries(Monastery PRIVATE Qt6::Core Qt6::Widgets Qt6::PrintSupport ${HUNSPELL_LIBRARY})
 
 set_target_properties(Monastery PROPERTIES
     WIN32_EXECUTABLE TRUE
