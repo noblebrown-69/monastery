@@ -1,6 +1,7 @@
 #include "MonasteryFrame.h"
 #include "MonasteryEditor.h"
 #include <QApplication>
+#include <algorithm>
 #include <QMenuBar>
 #include <QMenu>
 #include <QToolBar>
@@ -276,11 +277,16 @@ nullptr
 
 MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
     setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
+    setMouseTracking(true);  // Enable mouse tracking for cursor changes
+    setStyleSheet("QWidget { background-color: #3C2F2F; }");  // Match title bar color for borders
     setFont(QFont("Noto Serif", 12));
     setGeometry(100, 100, 800, 600);
 
     createDocsFolder();
     m_currentFilePath.clear();
+    m_dragging = false;
+    m_resizing = false;
+    m_resizeDirection = None;
 
     createActions();
 
@@ -288,9 +294,9 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
     mainLayout->setContentsMargins(0,0,0,0);
     mainLayout->setSpacing(0);
 
-    // titleBar - darker brown like Aureus
+    // titleBar - dark leather like Aureus
     m_titleBar = new QWidget;
-    m_titleBar->setStyleSheet("background-color: #6B4423;");
+    m_titleBar->setStyleSheet("background-color: #3C2F2F;");
     m_titleBar->setFixedHeight(30);
     QHBoxLayout *titleLayout = new QHBoxLayout(m_titleBar);
     titleLayout->setContentsMargins(10,0,10,0);
@@ -319,7 +325,7 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
     QLabel *titleLabel = new QLabel("Monastery");
     QFont titleFont("Noto Serif", 10, QFont::Bold);
     titleLabel->setFont(titleFont);
-    titleLabel->setStyleSheet("color: #E8D9B5;");
+    titleLabel->setStyleSheet("color: #D4AF37;");   // gold contrast like Aureus
 
     QWidget *leftSpacer = new QWidget();
     leftSpacer->setFixedWidth(90);
@@ -333,9 +339,14 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
     titleLayout->addWidget(closeBtn);
     mainLayout->addWidget(m_titleBar);
 
-    // menuBar
+    // menuBar - dark leather with readable menu items
     m_menuBar = new QMenuBar;
-    m_menuBar->setStyleSheet("QMenuBar { background-color: #D2B48C; color: #3C2F2F; }");
+    m_menuBar->setStyleSheet("QMenuBar { background-color: #3C2F2F; color: #D4AF37; }"
+                             "QMenuBar::item { background-color: transparent; color: #D4AF37; }"
+                             "QMenuBar::item:selected { background-color: #5C4A3F; color: #F5E8C7; }"
+                             "QMenu { background-color: #3C2F2F; color: #D4AF37; border: 1px solid #5C4A3F; }"
+                             "QMenu::item { background-color: transparent; color: #D4AF37; }"
+                             "QMenu::item:selected { background-color: #5C4A3F; color: #F5E8C7; }");
     QMenu *fileMenu = m_menuBar->addMenu("&File");
     fileMenu->addAction(m_newAction);
     fileMenu->addAction(m_openAction);
@@ -344,19 +355,42 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
     fileMenu->addAction(m_printAction);
     fileMenu->addSeparator();
     fileMenu->addAction(m_exitAction);
+    foreach (QAction *action, fileMenu->actions()) {
+        action->setIconVisibleInMenu(false);
+    }
     QMenu *editMenu = m_menuBar->addMenu("&Edit");
     editMenu->addAction(m_undoAction);
     editMenu->addAction(m_redoAction);
     editMenu->addSeparator();
+    editMenu->addAction(m_cutAction);
+    editMenu->addAction(m_copyAction);
+    editMenu->addAction(m_pasteAction);
+    editMenu->addSeparator();
     editMenu->addAction(m_pageBreakAction);
     mainLayout->addWidget(m_menuBar);
 
-    // toolBar
+    // toolBar - leather theme with readable elements
     m_toolBar = new QToolBar;
     m_toolBar->setToolButtonStyle(Qt::ToolButtonIconOnly);
     m_toolBar->setIconSize(QSize(16, 16));
-    m_toolBar->setStyleSheet("QToolBar { background-color: #D2B48C; }");
-    // Set icons
+    m_toolBar->setStyleSheet("QToolBar {"
+                             "  background-color: #6F5A4A;"
+                             "  border-left: 8px solid #3C2F2F;"
+                             "  border-right: 8px solid #3C2F2F;"
+                             "  border-top: 0;"
+                             "  border-bottom: 0;"
+                             "  padding: 4px 0;"
+                             "}"
+                             "QToolButton { background-color: transparent; border: none; padding: 2px; }"
+                             "QToolButton:hover { background-color: #8B7355; border-radius: 2px; }"
+                             "QToolButton:pressed { background-color: #5C4A3F; }"
+                             "QComboBox { background-color: #5C4A3F; color: #F5E8C7; border: 1px solid #8B7355; border-radius: 2px; padding: 2px; min-width: 60px; }"
+                             "QComboBox:hover { background-color: #8B7355; }"
+                             "QComboBox::drop-down { border: none; background-color: #5C4A3F; }"
+                             "QComboBox::down-arrow { image: none; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 4px solid #F5E8C7; margin-right: 4px; }"
+                             "QComboBox QAbstractItemView { background-color: #3C2F2F; color: #F5E8C7; border: 1px solid #5C4A3F; selection-background-color: #8B7355; }");
+
+    // Set icons (keep all the existing icon lines exactly as they are)
     m_boldAction->setIcon(QIcon(":/icons/bold.png"));
     m_italicAction->setIcon(QIcon(":/icons/italic.png"));
     m_underlineAction->setIcon(QIcon(":/icons/underline.png"));
@@ -397,20 +431,24 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
     m_editor = new MonasteryEditor(this);
     mainLayout->addWidget(m_editor, 1);
 
-    // statusBar - darker brown + permanent word count on right
+    // statusBar - dark leather + permanent word count
     m_statusBar = new QStatusBar;
     m_statusBar->setSizeGripEnabled(true);
-    m_statusBar->setStyleSheet("background-color: #6B4423; color: #F5E8C7;");
+    m_statusBar->setStyleSheet("background-color: #3C2F2F; color: #D4AF37;");
     m_statusBar->setFont(QFont("Noto Serif", 8));
-
-    // Permanent word count label on the right (always visible)
     m_wordCountLabel = new QLabel("Words: 0");
     m_wordCountLabel->setAlignment(Qt::AlignRight);
     m_statusBar->addPermanentWidget(m_wordCountLabel);
-
     mainLayout->addWidget(m_statusBar);
 
     setLayout(mainLayout);
+
+    // Style QMessageBox to match dark leather theme
+    qApp->setStyleSheet("QMessageBox { background-color: #3C2F2F; color: #D4AF37; }"
+                        "QMessageBox QLabel { color: #D4AF37; }"
+                        "QMessageBox QPushButton { background-color: #6F5A4A; color: #D4AF37; border: 1px solid #3C2F2F; padding: 5px; }"
+                        "QMessageBox QPushButton:hover { background-color: #8B6F5A; }");
+
     setWindowIcon(QIcon(":/icons/monastery.png"));
 
     setMinimumSize(680, 460);  // lets us shrink freely while keeping UI usable
@@ -423,6 +461,16 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
     connect(m_editor->textEdit(), &QTextEdit::textChanged, this, &MonasteryFrame::updateWordCount);
     connect(m_undoAction, &QAction::triggered, m_editor->textEdit(), &QTextEdit::undo);
     connect(m_redoAction, &QAction::triggered, m_editor->textEdit(), &QTextEdit::redo);
+    connect(m_cutAction, &QAction::triggered, m_editor->textEdit(), &QTextEdit::cut);
+    connect(m_copyAction, &QAction::triggered, m_editor->textEdit(), &QTextEdit::copy);
+    connect(m_pasteAction, &QAction::triggered, m_editor->textEdit(), &QTextEdit::paste);
+
+    // Install event filter on child widgets for cursor updates
+    m_titleBar->installEventFilter(this);
+    m_menuBar->installEventFilter(this);
+    m_toolBar->installEventFilter(this);
+    m_editor->installEventFilter(this);
+    m_statusBar->installEventFilter(this);
 
     m_statusBar->showMessage("Ready");
     updateWordCount();
@@ -532,6 +580,15 @@ void MonasteryFrame::createActions() {
 
     m_redoAction = new QAction("Redo", this);
     m_redoAction->setShortcut(QKeySequence::Redo);
+
+    m_cutAction = new QAction("Cu&t", this);
+    m_cutAction->setShortcut(QKeySequence::Cut);
+
+    m_copyAction = new QAction("&Copy", this);
+    m_copyAction->setShortcut(QKeySequence::Copy);
+
+    m_pasteAction = new QAction("&Paste", this);
+    m_pasteAction->setShortcut(QKeySequence::Paste);
 
     m_pageBreakAction = new QAction("Insert Page &Break", this);
     connect(m_pageBreakAction, &QAction::triggered, this, &MonasteryFrame::onInsertPageBreak);
@@ -670,9 +727,9 @@ void MonasteryFrame::onSizeChanged(const QString &size) {
     bool ok;
     int pointSize = size.toInt(&ok);
     if (ok) {
-        QFont currentFont = m_editor->textEdit()->currentFont();
-        currentFont.setPointSize(pointSize);
-        m_editor->textEdit()->setCurrentFont(currentFont);
+        QTextCharFormat format = m_editor->textEdit()->currentCharFormat();
+        format.setFontPointSize(pointSize);
+        m_editor->textEdit()->mergeCurrentCharFormat(format);
     }
 }
 
@@ -696,10 +753,46 @@ void MonasteryFrame::closeEvent(QCloseEvent *event) {
 }
 
 void MonasteryFrame::mousePressEvent(QMouseEvent *event) {
-    if (event->button() == Qt::LeftButton && m_titleBar->geometry().contains(event->pos())) {
-        m_dragging = true;
-        m_dragPosition = event->globalPosition().toPoint() - frameGeometry().topLeft();
-        event->accept();
+    if (event->button() == Qt::LeftButton) {
+        // Check for resize areas first (8-pixel border)
+        const int border = 8;
+        QRect rect = this->rect();
+        QPoint pos = event->pos();
+
+        if (pos.x() <= border && pos.y() <= border) {
+            m_resizeDirection = TopLeft;
+        } else if (pos.x() >= rect.width() - border && pos.y() <= border) {
+            m_resizeDirection = TopRight;
+        } else if (pos.x() <= border && pos.y() >= rect.height() - border) {
+            m_resizeDirection = BottomLeft;
+        } else if (pos.x() >= rect.width() - border && pos.y() >= rect.height() - border) {
+            m_resizeDirection = BottomRight;
+        } else if (pos.x() <= border) {
+            m_resizeDirection = Left;
+        } else if (pos.x() >= rect.width() - border) {
+            m_resizeDirection = Right;
+        } else if (pos.y() <= border) {
+            m_resizeDirection = Top;
+        } else if (pos.y() >= rect.height() - border) {
+            m_resizeDirection = Bottom;
+        } else {
+            m_resizeDirection = None;
+        }
+
+        if (m_resizeDirection != None) {
+            m_resizing = true;
+            m_resizeStartPos = this->pos();  // Window position when resize started
+            m_resizeStartSize = size();  // Window size when resize started
+            m_resizeStartMousePos = event->globalPosition().toPoint();  // Mouse position when resize started
+            event->accept();
+        } else if (m_titleBar->geometry().contains(event->pos())) {
+            // Only start dragging if not in resize area and in title bar
+            m_dragging = true;
+            m_dragPosition = event->globalPosition().toPoint() - frameGeometry().topLeft();
+            event->accept();
+        } else {
+            QWidget::mousePressEvent(event);
+        }
     } else {
         QWidget::mousePressEvent(event);
     }
@@ -709,13 +802,82 @@ void MonasteryFrame::mouseMoveEvent(QMouseEvent *event) {
     if (m_dragging) {
         move(event->globalPosition().toPoint() - m_dragPosition);
         event->accept();
+    } else if (m_resizing) {
+        QPoint delta = event->globalPosition().toPoint() - m_resizeStartMousePos;
+        QPoint newPos = m_resizeStartPos;
+        QSize newSize = m_resizeStartSize;
+
+        switch (m_resizeDirection) {
+            case Left:
+                newPos.setX(m_resizeStartPos.x() + delta.x());
+                newSize.setWidth(std::max(minimumWidth(), m_resizeStartSize.width() - delta.x()));
+                break;
+            case Right:
+                newSize.setWidth(std::max(minimumWidth(), m_resizeStartSize.width() + delta.x()));
+                break;
+            case Top:
+                newPos.setY(m_resizeStartPos.y() + delta.y());
+                newSize.setHeight(std::max(minimumHeight(), m_resizeStartSize.height() - delta.y()));
+                break;
+            case Bottom:
+                newSize.setHeight(std::max(minimumHeight(), m_resizeStartSize.height() + delta.y()));
+                break;
+            case TopLeft:
+                newPos.setX(m_resizeStartPos.x() + delta.x());
+                newPos.setY(m_resizeStartPos.y() + delta.y());
+                newSize.setWidth(std::max(minimumWidth(), m_resizeStartSize.width() - delta.x()));
+                newSize.setHeight(std::max(minimumHeight(), m_resizeStartSize.height() - delta.y()));
+                break;
+            case TopRight:
+                newPos.setY(m_resizeStartPos.y() + delta.y());
+                newSize.setWidth(std::max(minimumWidth(), m_resizeStartSize.width() + delta.x()));
+                newSize.setHeight(std::max(minimumHeight(), m_resizeStartSize.height() - delta.y()));
+                break;
+            case BottomLeft:
+                newPos.setX(m_resizeStartPos.x() + delta.x());
+                newSize.setWidth(std::max(minimumWidth(), m_resizeStartSize.width() - delta.x()));
+                newSize.setHeight(std::max(minimumHeight(), m_resizeStartSize.height() + delta.y()));
+                break;
+            case BottomRight:
+                newSize.setWidth(std::max(minimumWidth(), m_resizeStartSize.width() + delta.x()));
+                newSize.setHeight(std::max(minimumHeight(), m_resizeStartSize.height() + delta.y()));
+                break;
+            default:
+                break;
+        }
+
+        setGeometry(QRect(newPos, newSize));
+        event->accept();
     } else {
+        // Update cursor based on position
+        const int border = 8;
+        QRect rect = this->rect();
+        QPoint pos = event->pos();
+
+        if (pos.x() <= border && pos.y() <= border) {
+            setCursor(Qt::SizeFDiagCursor);
+        } else if (pos.x() >= rect.width() - border && pos.y() <= border) {
+            setCursor(Qt::SizeBDiagCursor);
+        } else if (pos.x() <= border && pos.y() >= rect.height() - border) {
+            setCursor(Qt::SizeBDiagCursor);
+        } else if (pos.x() >= rect.width() - border && pos.y() >= rect.height() - border) {
+            setCursor(Qt::SizeFDiagCursor);
+        } else if (pos.x() <= border || pos.x() >= rect.width() - border) {
+            setCursor(Qt::SizeHorCursor);
+        } else if (pos.y() <= border || pos.y() >= rect.height() - border) {
+            setCursor(Qt::SizeVerCursor);
+        } else {
+            setCursor(Qt::ArrowCursor);
+        }
+
         QWidget::mouseMoveEvent(event);
     }
 }
 
 void MonasteryFrame::mouseReleaseEvent(QMouseEvent *event) {
     m_dragging = false;
+    m_resizing = false;
+    m_resizeDirection = None;
     QWidget::mouseReleaseEvent(event);
 }
 
@@ -736,6 +898,38 @@ void MonasteryFrame::mouseDoubleClickEvent(QMouseEvent *event) {
 void MonasteryFrame::resizeEvent(QResizeEvent *event) {
     m_titleBar->setFixedWidth(width());
     QWidget::resizeEvent(event);
+}
+
+bool MonasteryFrame::eventFilter(QObject *obj, QEvent *event) {
+    if (event->type() == QEvent::MouseMove) {
+        QMouseEvent *mouseEvent = static_cast<QMouseEvent *>(event);
+        // Update cursor based on global position relative to main window
+        QPoint globalPos = mouseEvent->globalPosition().toPoint();
+        QPoint localPos = mapFromGlobal(globalPos);
+
+        const int border = 8;
+        QRect rect = this->rect();
+
+        if (localPos.x() >= 0 && localPos.x() < rect.width() &&
+            localPos.y() >= 0 && localPos.y() < rect.height()) {
+            if (localPos.x() <= border && localPos.y() <= border) {
+                setCursor(Qt::SizeFDiagCursor);
+            } else if (localPos.x() >= rect.width() - border && localPos.y() <= border) {
+                setCursor(Qt::SizeBDiagCursor);
+            } else if (localPos.x() <= border && localPos.y() >= rect.height() - border) {
+                setCursor(Qt::SizeBDiagCursor);
+            } else if (localPos.x() >= rect.width() - border && localPos.y() >= rect.height() - border) {
+                setCursor(Qt::SizeFDiagCursor);
+            } else if (localPos.x() <= border || localPos.x() >= rect.width() - border) {
+                setCursor(Qt::SizeHorCursor);
+            } else if (localPos.y() <= border || localPos.y() >= rect.height() - border) {
+                setCursor(Qt::SizeVerCursor);
+            } else {
+                setCursor(Qt::ArrowCursor);
+            }
+        }
+    }
+    return QWidget::eventFilter(obj, event);
 }
 
 void MonasteryFrame::onSaveAs() {

@@ -57,6 +57,13 @@ void HunspellHighlighter::addWord(const QString &word) {
     }
 }
 
+bool HunspellHighlighter::isMisspelled(const QString &word) {
+    if (m_hunspell && !word.isEmpty()) {
+        return !Hunspell_spell(m_hunspell, word.toUtf8().constData());
+    }
+    return false;
+}
+
 void HunspellHighlighter::highlightBlock(const QString &text) {
     QTextCharFormat errorFormat;
     errorFormat.setUnderlineColor(Qt::red);
@@ -76,18 +83,22 @@ void HunspellHighlighter::highlightBlock(const QString &text) {
 
 MonasteryEditor::MonasteryEditor(QWidget *parent) : QWidget(parent) {
     QVBoxLayout *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(5, 5, 10, 10);
+    layout->setContentsMargins(8, 8, 8, 8);
     layout->setSpacing(0);
 
     m_textEdit = new QTextEdit(this);
-    QPalette palette = m_textEdit->palette();
-    palette.setColor(QPalette::Base, QColor(245, 235, 210));
-    palette.setColor(QPalette::Text, QColor(50, 50, 50));
-    m_textEdit->setPalette(palette);
 
-    QString fontFamily = "Noto Serif";
+    // Editor appearance - exact match to Aureus "Leather Zibaldone" theme
+    m_textEdit->setStyleSheet("QTextEdit {"
+                              "  background-color: #F5E8C7;"
+                              "  color: #000000;"
+                              "  selection-background-color: #D4AF37;"
+                              "  selection-color: #000000;"
+                              "}");
+
+    QString fontFamily = "Georgia";
     if (!QFontDatabase::families().contains(fontFamily)) {
-        fontFamily = "Georgia";
+        fontFamily = "Noto Serif";
         if (!QFontDatabase::families().contains(fontFamily)) {
             fontFamily = "EB Garamond";
         }
@@ -111,20 +122,29 @@ void MonasteryEditor::refreshHighlighter() {
 }
 
 void MonasteryEditor::showContextMenu(const QPoint &pos) {
-    QMenu menu;
-    QAction *addToDict = menu.addAction("Add to Dictionary");
-    connect(addToDict, &QAction::triggered, this, [this, pos]() {
-        QTextCursor cursor = m_textEdit->cursorForPosition(pos);
-        cursor.select(QTextCursor::WordUnderCursor);
-        QString word = cursor.selectedText().trimmed();
+    QMenu *menu = m_textEdit->createStandardContextMenu(pos);
 
-        if (!word.isEmpty() && m_highlighter) {
-            qDebug() << "Right-click add requested for word:" << word;
-            m_highlighter->addWord(word);
-            refreshHighlighter();   // this is the key line that fixes everything
-            qDebug() << "✅ Refreshed highlighter - underline should clear";
-        }
-    });
-    menu.exec(m_textEdit->mapToGlobal(pos));
+    // Check if we're on a misspelled word
+    QTextCursor cursor = m_textEdit->cursorForPosition(pos);
+    cursor.select(QTextCursor::WordUnderCursor);
+    QString word = cursor.selectedText().trimmed();
+
+    bool isMisspelled = m_highlighter && m_highlighter->isMisspelled(word);
+
+    if (isMisspelled) {
+        menu->addSeparator();
+        QAction *addToDict = menu->addAction("Add to Dictionary");
+        connect(addToDict, &QAction::triggered, this, [this, word]() {
+            if (!word.isEmpty() && m_highlighter) {
+                qDebug() << "Right-click add requested for word:" << word;
+                m_highlighter->addWord(word);
+                refreshHighlighter();
+                qDebug() << "✅ Refreshed highlighter - underline should clear";
+            }
+        });
+    }
+
+    menu->exec(m_textEdit->mapToGlobal(pos));
+    delete menu;
 }
 

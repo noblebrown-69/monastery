@@ -24,6 +24,7 @@ protected:
     void mouseReleaseEvent(QMouseEvent *event) override;
     void mouseDoubleClickEvent(QMouseEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
+    bool eventFilter(QObject *obj, QEvent *event) override;
 
 private slots:
     void onNew();
@@ -61,6 +62,14 @@ private:
     QString m_currentFilePath;
     QRect m_normalGeometry;
 
+    // Resize handling
+    bool m_resizing;
+    QPoint m_resizeStartPos;
+    QPoint m_resizeStartMousePos;
+    QSize m_resizeStartSize;
+    enum ResizeDirection { None, Left, Right, Top, Bottom, TopLeft, TopRight, BottomLeft, BottomRight };
+    ResizeDirection m_resizeDirection;
+
     // Actions
     QAction *m_newAction;
     QAction *m_openAction;
@@ -80,6 +89,9 @@ private:
     QAction *m_pageBreakAction;
     QAction *m_undoAction;
     QAction *m_redoAction;
+    QAction *m_cutAction;
+    QAction *m_copyAction;
+    QAction *m_pasteAction;
     QLabel *m_wordCountLabel;
 };
 

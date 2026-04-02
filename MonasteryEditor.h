@@ -21,6 +21,7 @@ public:
 
     void addWord(const QString &word);
     void reloadDictionary();   // new: forces full reload
+    bool isMisspelled(const QString &word);
 
 protected:
     void highlightBlock(const QString &text) override;
