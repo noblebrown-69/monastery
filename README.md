@@ -4,7 +4,7 @@
 
 Built for Linux (Ubuntu/Mint) with a warm sepia parchment aesthetic. Single executable. Zero bloat. Lives in Dropbox and runs anywhere.
 
-![Monastery Screenshot](https://github.com/noblebrown-69/monastery/raw/main/screenshot1.1.png)
+![Monastery Screenshot](https://github.com/noblebrown-69/monastery/raw/main/screenshot1.3.png)
 
 ## Features
 
