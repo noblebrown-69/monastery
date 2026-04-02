@@ -443,11 +443,15 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
 
     setLayout(mainLayout);
 
-    // Style QMessageBox to match dark leather theme
+    // Global stylesheet for dark leather theme (QMessageBox + QFileDialog)
     qApp->setStyleSheet("QMessageBox { background-color: #3C2F2F; color: #D4AF37; }"
                         "QMessageBox QLabel { color: #D4AF37; }"
                         "QMessageBox QPushButton { background-color: #6F5A4A; color: #D4AF37; border: 1px solid #3C2F2F; padding: 5px; }"
-                        "QMessageBox QPushButton:hover { background-color: #8B6F5A; }");
+                        "QMessageBox QPushButton:hover { background-color: #8B6F5A; }"
+                        "QFileDialog { background-color: #3C2F2F; color: #D4AF37; }"
+                        "QFileDialog QLabel, QFileDialog QLineEdit, QFileDialog QTreeView, QFileDialog QListView, QFileDialog QComboBox, QFileDialog QHeaderView::section { color: #D4AF37; background-color: #3C2F2F; }"
+                        "QFileDialog QPushButton { background-color: #6F5A4A; color: #D4AF37; border: 1px solid #3C2F2F; padding: 4px 8px; }"
+                        "QFileDialog QPushButton:hover { background-color: #8B6F5A; }");
 
     setWindowIcon(QIcon(":/icons/monastery.png"));
 
@@ -620,7 +624,7 @@ void MonasteryFrame::onNew() {
 }
 
 void MonasteryFrame::onOpen() {
-    QString fileName = QFileDialog::getOpenFileName(this, "Open HTML", m_docsDir, "HTML files (*.html)");
+    QString fileName = QFileDialog::getOpenFileName(this, "Open HTML", m_docsDir, "HTML files (*.html)", nullptr, QFileDialog::DontUseNativeDialog);
     if (fileName.isEmpty()) return;
 
     QFile file(fileName);
@@ -635,8 +639,10 @@ void MonasteryFrame::onOpen() {
 
 void MonasteryFrame::onSave() {
     if (m_currentFilePath.isEmpty() || m_currentFilePath.contains("Monastery_AutoSave.html")) {
-        onSaveAs();
-        return;
+        QString fileName = QFileDialog::getSaveFileName(this, "Save HTML", m_docsDir, "HTML files (*.html)", nullptr, QFileDialog::DontUseNativeDialog);
+        if (fileName.isEmpty()) return;
+        if (!fileName.endsWith(".html")) fileName += ".html";
+        m_currentFilePath = fileName;
     }
     QFile file(m_currentFilePath);
     if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
@@ -933,7 +939,7 @@ bool MonasteryFrame::eventFilter(QObject *obj, QEvent *event) {
 }
 
 void MonasteryFrame::onSaveAs() {
-    QString fileName = QFileDialog::getSaveFileName(this, "Save HTML", m_docsDir, "HTML files (*.html)");
+    QString fileName = QFileDialog::getSaveFileName(this, "Save HTML", m_docsDir, "HTML files (*.html)", nullptr, QFileDialog::DontUseNativeDialog);
     if (fileName.isEmpty()) return;
     if (!fileName.endsWith(".html")) fileName += ".html";
     m_currentFilePath = fileName;
