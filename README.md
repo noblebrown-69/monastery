@@ -4,7 +4,7 @@ A calm, portable Linux word processor. One AppImage. No install. Drop it in Drop
 
 Qt6 + C++. The page is a real sheet of parchment on a leather desk. Three other skins live under **Theme**.
 
-![Monastery](https://github.com/noblebrown-69/monastery/raw/main/screenshot1.3.png)
+![Monastery](https://github.com/noblebrown-69/monastery/raw/main/screenshot2.0.png)
 
 ## What's in 2.0
 
