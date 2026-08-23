@@ -1,7 +1,9 @@
 #include "MonasteryFrame.h"
 #include "MonasteryEditor.h"
+#include "Theme.h"
 #include <QApplication>
 #include <algorithm>
+#include <memory>
 #include <QMenuBar>
 #include <QMenu>
 #include <QToolBar>
@@ -19,9 +21,11 @@
 #include <QPixmap>
 #include <QIcon>
 #include <QRegularExpression>
-#include <QTextEdit>
 #include <QPrinter>
 #include <QPrintDialog>
+#include <QPageLayout>
+#include <QPageSize>
+#include <QWebEnginePage>
 #include <QMouseEvent>
 #include <QResizeEvent>
 #include <QHBoxLayout>
@@ -30,34 +34,15 @@
 #include <QVBoxLayout>
 #include <QFileInfo>
 #include <QPainter>
-
-// Member variables
-QWidget *m_titleBar;
-QMenuBar *m_menuBar;
-QToolBar *m_toolBar;
-QStatusBar *m_statusBar;
-QPoint m_dragPosition;
-bool m_dragging;
-MonasteryEditor *m_editor;
-QTimer *m_autoSaveTimer;
-QString m_docsDir;
-QAction *m_newAction;
-QAction *m_openAction;
-QAction *m_saveAction;
-QAction *m_printAction;
-QAction *m_exitAction;
-QAction *m_boldAction;
-QAction *m_italicAction;
-QAction *m_underlineAction;
-QAction *m_alignLeftAction;
-QAction *m_alignCenterAction;
-QAction *m_alignRightAction;
-QAction *m_justifyAction;
-QAction *m_bulletAction;
-QAction *m_numberAction;
-QAction *m_undoAction;
-QAction *m_redoAction;
-QAction *m_pageBreakAction;
+#include <QEventLoop>
+#include <QDialog>
+#include <QLineEdit>
+#include <QDialogButtonBox>
+#include <QStringConverter>
+#include <QSettings>
+#include <QSignalBlocker>
+#include <QColor>
+#include <QFont>
 
 // Embedded XPM icons for classic Word 6.0 look
 static const char *bold_xpm[] = {
@@ -275,12 +260,12 @@ static const char *number_xpm[] = {
 nullptr
 };
 
-MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
+MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent), m_currentTheme(themeForId(ThemeId::Leather)) {
     setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
     setMouseTracking(true);  // Enable mouse tracking for cursor changes
     setStyleSheet("QWidget { background-color: #3C2F2F; }");  // Match title bar color for borders
     setFont(QFont("Noto Serif", 12));
-    setGeometry(100, 100, 800, 600);
+    setGeometry(80, 40, 1100, 850);
 
     createDocsFolder();
     m_currentFilePath.clear();
@@ -301,14 +286,14 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
     QHBoxLayout *titleLayout = new QHBoxLayout(m_titleBar);
     titleLayout->setContentsMargins(10,0,10,0);
 
-    QPushButton *minBtn = new QPushButton("—");
-    minBtn->setFixedSize(30,30);
-    minBtn->setStyleSheet("border: none; background: transparent; color: white;");
-    connect(minBtn, &QPushButton::clicked, this, &QWidget::showMinimized);
-    QPushButton *maxBtn = new QPushButton("□");
-    maxBtn->setFixedSize(30,30);
-    maxBtn->setStyleSheet("border: none; background: transparent; color: white;");
-    connect(maxBtn, &QPushButton::clicked, this, [this]() {
+    m_minBtn = new QPushButton("—");
+    m_minBtn->setFixedSize(30,30);
+    m_minBtn->setStyleSheet("border: none; background: transparent; color: white;");
+    connect(m_minBtn, &QPushButton::clicked, this, &QWidget::showMinimized);
+    m_maxBtn = new QPushButton("□");
+    m_maxBtn->setFixedSize(30,30);
+    m_maxBtn->setStyleSheet("border: none; background: transparent; color: white;");
+    connect(m_maxBtn, &QPushButton::clicked, this, [this]() {
         if (isMaximized()) {
             showNormal();
             setGeometry(m_normalGeometry);
@@ -317,26 +302,26 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
             showMaximized();
         }
     });
-    QPushButton *closeBtn = new QPushButton("×");
-    closeBtn->setFixedSize(30,30);
-    closeBtn->setStyleSheet("border: none; background: transparent; color: white;");
-    connect(closeBtn, &QPushButton::clicked, this, &QWidget::close);
+    m_closeBtn = new QPushButton("×");
+    m_closeBtn->setFixedSize(30,30);
+    m_closeBtn->setStyleSheet("border: none; background: transparent; color: white;");
+    connect(m_closeBtn, &QPushButton::clicked, this, &QWidget::close);
 
-    QLabel *titleLabel = new QLabel("Monastery");
+    m_titleLabel = new QLabel("Monastery — Untitled");
     QFont titleFont("Noto Serif", 10, QFont::Bold);
-    titleLabel->setFont(titleFont);
-    titleLabel->setStyleSheet("color: #D4AF37;");   // gold contrast like Aureus
+    m_titleLabel->setFont(titleFont);
+    m_titleLabel->setStyleSheet("color: #D4AF37;");   // gold contrast like Aureus
 
     QWidget *leftSpacer = new QWidget();
     leftSpacer->setFixedWidth(90);
 
     titleLayout->addWidget(leftSpacer);
     titleLayout->addStretch();
-    titleLayout->addWidget(titleLabel);
+    titleLayout->addWidget(m_titleLabel);
     titleLayout->addStretch();
-    titleLayout->addWidget(minBtn);
-    titleLayout->addWidget(maxBtn);
-    titleLayout->addWidget(closeBtn);
+    titleLayout->addWidget(m_minBtn);
+    titleLayout->addWidget(m_maxBtn);
+    titleLayout->addWidget(m_closeBtn);
     mainLayout->addWidget(m_titleBar);
 
     // menuBar - dark leather with readable menu items
@@ -366,7 +351,29 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
     editMenu->addAction(m_copyAction);
     editMenu->addAction(m_pasteAction);
     editMenu->addSeparator();
+    editMenu->addAction(m_findAction);
+    editMenu->addSeparator();
     editMenu->addAction(m_pageBreakAction);
+    editMenu->addSeparator();
+    editMenu->addAction(m_narrowMarginsAction);
+    QMenu *viewMenu = m_menuBar->addMenu("&View");
+    viewMenu->addAction(m_focusModeAction);
+
+    QMenu *themeMenu = m_menuBar->addMenu("&Theme");
+    m_themeGroup = new QActionGroup(this);
+    m_themeGroup->setExclusive(true);
+    for (const Theme &th : allThemes()) {
+        QAction *action = themeMenu->addAction(th.name);
+        action->setCheckable(true);
+        action->setData(th.id);
+        m_themeGroup->addAction(action);
+        const ThemeId id = th.themeId;
+        connect(action, &QAction::triggered, this, [this, id](bool checked) {
+            if (checked)
+                applyTheme(id);
+        });
+    }
+
     mainLayout->addWidget(m_menuBar);
 
     // toolBar - leather theme with readable elements
@@ -430,6 +437,26 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
     // editor
     m_editor = new MonasteryEditor(this);
     mainLayout->addWidget(m_editor, 1);
+    connect(m_editor, &MonasteryEditor::wordCountChanged, this, [this](int count) {
+        m_wordCountLabel->setText(QString("Words: %1").arg(count));
+    });
+    connect(m_editor, &MonasteryEditor::dirtyChanged, this, [this](bool) {
+        updateTitleBar();
+    });
+    connect(m_editor, &MonasteryEditor::ready, this, [this](bool ok) {
+        if (ok) {
+            applyTheme(m_currentTheme.themeId);
+            QTimer::singleShot(150, this, &MonasteryFrame::maybeRestoreAutosave);
+        }
+    });
+    connect(m_editor->webView()->page(), &QWebEnginePage::pdfPrintingFinished,
+            this, [this](const QString &path, bool success) {
+        if (!success)
+            QMessageBox::warning(this, "PDF Export Failed",
+                                 "Could not write the PDF:\n" + path);
+        else
+            m_statusBar->showMessage("Exported PDF: " + path);
+    });
 
     // statusBar - dark leather + permanent word count
     m_statusBar = new QStatusBar;
@@ -453,7 +480,11 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
                         "QFileDialog QPushButton { background-color: #6F5A4A; color: #D4AF37; border: 1px solid #3C2F2F; padding: 4px 8px; }"
                         "QFileDialog QPushButton:hover { background-color: #8B6F5A; }"
                         "QMenu { background-color: #6F5A4A; color: #D4AF37; border: 1px solid #3C2F2F; }"
-                        "QMenu::item:selected { background-color: #8B6F5A; color: #D4AF37; }");
+                        "QMenu::item:selected { background-color: #8B6F5A; color: #D4AF37; }"
+                        "QDialog { background-color: #3C2F2F; color: #D4AF37; }"
+                        "QDialog QLabel { color: #D4AF37; }"
+                        "QLineEdit { background-color: #5C4A3F; color: #F5E8C7; border: 1px solid #8B7355; padding: 4px; }"
+                        "QDialog QPushButton { background-color: #6F5A4A; color: #D4AF37; border: 1px solid #3C2F2F; padding: 5px; }");
 
     setWindowIcon(QIcon(":/icons/monastery.png"));
 
@@ -464,22 +495,30 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent) {
     connect(m_autoSaveTimer, &QTimer::timeout, this, &MonasteryFrame::onAutoSave);
     m_autoSaveTimer->start(30000);  // 30 seconds
 
-    connect(m_editor->textEdit(), &QTextEdit::textChanged, this, &MonasteryFrame::updateWordCount);
-    connect(m_undoAction, &QAction::triggered, m_editor->textEdit(), &QTextEdit::undo);
-    connect(m_redoAction, &QAction::triggered, m_editor->textEdit(), &QTextEdit::redo);
-    connect(m_cutAction, &QAction::triggered, m_editor->textEdit(), &QTextEdit::cut);
-    connect(m_copyAction, &QAction::triggered, m_editor->textEdit(), &QTextEdit::copy);
-    connect(m_pasteAction, &QAction::triggered, m_editor->textEdit(), &QTextEdit::paste);
+    // Route everything through the web editor
+    connect(m_undoAction, &QAction::triggered, this, [this]() { m_editor->execCommand("undo"); });
+    connect(m_redoAction, &QAction::triggered, this, [this]() { m_editor->execCommand("redo"); });
+    connect(m_cutAction,   &QAction::triggered, this, [this]() { m_editor->execCommand("cut"); });
+    connect(m_copyAction,  &QAction::triggered, this, [this]() { m_editor->execCommand("copy"); });
+    connect(m_pasteAction, &QAction::triggered, this, [this]() { m_editor->execCommand("paste"); });
+
+    // Label refresh is callback-only; the editor polls JS without QEventLoop.
+    m_wordCountPollTimer = new QTimer(this);
+    m_wordCountPollTimer->setInterval(900);
+    connect(m_wordCountPollTimer, &QTimer::timeout, this, &MonasteryFrame::updateWordCount);
+    m_wordCountPollTimer->start();
 
     // Install event filter on child widgets for cursor updates
     m_titleBar->installEventFilter(this);
     m_menuBar->installEventFilter(this);
     m_toolBar->installEventFilter(this);
-    m_editor->installEventFilter(this);
     m_statusBar->installEventFilter(this);
 
     m_statusBar->showMessage("Ready");
     updateWordCount();
+
+    QSettings settings(QStringLiteral("Monastery"), QStringLiteral("Monastery"));
+    applyTheme(themeIdFromString(settings.value(QStringLiteral("theme"), QStringLiteral("leather")).toString()));
 }
 
 MonasteryFrame::~MonasteryFrame() {
@@ -598,6 +637,24 @@ void MonasteryFrame::createActions() {
 
     m_pageBreakAction = new QAction("Insert Page &Break", this);
     connect(m_pageBreakAction, &QAction::triggered, this, &MonasteryFrame::onInsertPageBreak);
+
+    m_narrowMarginsAction = new QAction("Narrow Margins", this);
+    m_narrowMarginsAction->setCheckable(true);
+    m_narrowMarginsAction->setChecked(false);
+    connect(m_narrowMarginsAction, &QAction::triggered, this, &MonasteryFrame::onToggleNarrowMargins);
+
+    m_findAction = new QAction("&Find...", this);
+    m_findAction->setShortcut(QKeySequence::Find);
+    m_findAction->setShortcutContext(Qt::ApplicationShortcut);
+    connect(m_findAction, &QAction::triggered, this, &MonasteryFrame::onFind);
+    addAction(m_findAction);
+
+    m_focusModeAction = new QAction("&Focus Mode", this);
+    m_focusModeAction->setCheckable(true);
+    m_focusModeAction->setShortcut(QKeySequence(Qt::Key_F11));
+    m_focusModeAction->setShortcutContext(Qt::ApplicationShortcut);
+    connect(m_focusModeAction, &QAction::triggered, this, &MonasteryFrame::onToggleFocusMode);
+    addAction(m_focusModeAction);
 }
 
 void MonasteryFrame::createMenus() {
@@ -613,149 +670,113 @@ void MonasteryFrame::createStatusBar() {
 }
 
 void MonasteryFrame::onNew() {
-    if (m_editor->textEdit()->document()->isModified()) {
-        QMessageBox::StandardButton reply = QMessageBox::question(this, "Unsaved Changes",
-            "Document has unsaved changes. Save before creating new?", QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel);
-        if (reply == QMessageBox::Cancel) return;
-        if (reply == QMessageBox::Yes) onSave();
-    }
-    m_editor->textEdit()->clear();
-    m_editor->textEdit()->document()->setModified(false);
+    if (!confirmProceedIfDirty())
+        return;
+    m_editor->setHtml("<p></p>");
     m_currentFilePath.clear();
+    m_editor->markClean();
+    updateTitleBar();
     m_statusBar->showMessage("New document created");
+    updateWordCount();
 }
 
 void MonasteryFrame::onOpen() {
+    if (!confirmProceedIfDirty())
+        return;
+
     QString fileName = QFileDialog::getOpenFileName(this, "Open HTML", m_docsDir, "HTML files (*.html)", nullptr, QFileDialog::DontUseNativeDialog);
     if (fileName.isEmpty()) return;
 
     QFile file(fileName);
     if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         QString html = QString::fromUtf8(file.readAll());
-        m_editor->textEdit()->setHtml(html);
-        m_editor->textEdit()->document()->setModified(false);
+        m_editor->setHtml(html);
         m_currentFilePath = fileName;
+        m_editor->markClean();
+        updateTitleBar();
         m_statusBar->showMessage("File opened: " + fileName);
+        updateWordCount();
+    } else {
+        QMessageBox::warning(this, "Open Failed",
+                             "Could not read:\n" + fileName + "\n" + file.errorString());
     }
 }
 
 void MonasteryFrame::onSave() {
-    if (m_currentFilePath.isEmpty() || m_currentFilePath.contains("Monastery_AutoSave.html")) {
-        QString fileName = QFileDialog::getSaveFileName(this, "Save HTML", m_docsDir, "HTML files (*.html)", nullptr, QFileDialog::DontUseNativeDialog);
-        if (fileName.isEmpty()) return;
-        if (!fileName.endsWith(".html")) fileName += ".html";
-        m_currentFilePath = fileName;
-    }
-    QFile file(m_currentFilePath);
-    if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        QTextStream out(&file);
-        out << m_editor->textEdit()->toHtml();
-        m_editor->textEdit()->document()->setModified(false);
-        m_statusBar->showMessage("Saved to " + m_currentFilePath);
-    }
+    saveNow();
 }
 
 void MonasteryFrame::onExit() {
-    QApplication::quit();
+    close();
 }
 
 void MonasteryFrame::onAutoSave() {
-    QString fileName = m_docsDir + "/Monastery_AutoSave.html";
-    QFile file(fileName);
-    if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        QTextStream out(&file);
-        out << m_editor->textEdit()->toHtml();
-        m_statusBar->showMessage("Saved to " + fileName);
-    }
+    m_editor->fetchHtml([this](const QString &html) {
+        if (wouldClobberManuscript(html)) {
+            m_statusBar->showMessage("Autosave skipped — empty or incomplete editor content");
+            return;
+        }
+        const QString fileName = hasNamedDocument()
+            ? autosaveSidecarPath()
+            : (m_docsDir + "/Monastery_AutoSave.html");
+        if (writeHtmlFile(fileName, html))
+            m_statusBar->showMessage("Auto-saved to " + fileName);
+    });
 }
 
 void MonasteryFrame::onPrint() {
-    QPrinter printer;
-    QPrintDialog dialog(&printer, this);
-    if (dialog.exec() == QDialog::Accepted) {
-        m_editor->textEdit()->print(&printer);
-    }
+    QString fileName = QFileDialog::getSaveFileName(this, "Export PDF", m_docsDir, "PDF files (*.pdf)", nullptr, QFileDialog::DontUseNativeDialog);
+    if (fileName.isEmpty()) return;
+    if (!fileName.endsWith(".pdf")) fileName += ".pdf";
+
+    QPageLayout layout(QPageSize(QPageSize::Letter),
+                       QPageLayout::Portrait,
+                       QMarginsF(0.75, 0.75, 0.75, 0.75),
+                       QPageLayout::Inch);
+    m_editor->webView()->page()->printToPdf(fileName, layout);
+    m_statusBar->showMessage("Exporting to PDF: " + fileName);
 }
 
 void MonasteryFrame::onInsertPageBreak() {
-    QTextCursor cursor = m_editor->textEdit()->textCursor();
-    cursor.insertHtml("<hr style=\"border: 1px dashed #666;\">");
-    m_editor->textEdit()->setTextCursor(cursor);
+    m_editor->execCommand("insertHTML",
+        "<div class=\"page-break\" style=\"page-break-after: always; border: none; border-top: 1px dashed #8B7355; margin: 30px 0;\"></div>");
 }
 
-void MonasteryFrame::onBold() {
-    QTextCharFormat fmt;
-    fmt.setFontWeight(m_boldAction->isChecked() ? QFont::Bold : QFont::Normal);
-    m_editor->textEdit()->mergeCurrentCharFormat(fmt);
-}
+void MonasteryFrame::onBold() { m_editor->execCommand("bold"); }
 
-void MonasteryFrame::onItalic() {
-    QTextCharFormat fmt;
-    fmt.setFontItalic(m_italicAction->isChecked());
-    m_editor->textEdit()->mergeCurrentCharFormat(fmt);
-}
+void MonasteryFrame::onItalic()        { m_editor->execCommand("italic"); }
+void MonasteryFrame::onUnderline()     { m_editor->execCommand("underline"); }
 
-void MonasteryFrame::onUnderline() {
-    QTextCharFormat fmt;
-    fmt.setFontUnderline(m_underlineAction->isChecked());
-    m_editor->textEdit()->mergeCurrentCharFormat(fmt);
-}
+void MonasteryFrame::onAlignLeft()   { m_editor->execCommand("justifyLeft"); }
+void MonasteryFrame::onAlignCenter() { m_editor->execCommand("justifyCenter"); }
+void MonasteryFrame::onAlignRight()  { m_editor->execCommand("justifyRight"); }
+void MonasteryFrame::onJustify()     { m_editor->execCommand("justifyFull"); }
 
-void MonasteryFrame::onAlignLeft() {
-    m_editor->textEdit()->setAlignment(Qt::AlignLeft);
-}
-
-void MonasteryFrame::onAlignCenter() {
-    m_editor->textEdit()->setAlignment(Qt::AlignCenter);
-}
-
-void MonasteryFrame::onAlignRight() {
-    m_editor->textEdit()->setAlignment(Qt::AlignRight);
-}
-
-void MonasteryFrame::onJustify() {
-    m_editor->textEdit()->setAlignment(Qt::AlignJustify);
-}
-
-void MonasteryFrame::onBulletList() {
-    m_editor->textEdit()->textCursor().insertList(QTextListFormat::ListDisc);
-}
-
-void MonasteryFrame::onNumberedList() {
-    m_editor->textEdit()->textCursor().insertList(QTextListFormat::ListDecimal);
-}
+void MonasteryFrame::onBulletList()    { m_editor->execCommand("insertUnorderedList"); }
+void MonasteryFrame::onNumberedList()  { m_editor->execCommand("insertOrderedList"); }
 
 void MonasteryFrame::onFontChanged(const QString &font) {
-    QFont currentFont = m_editor->textEdit()->currentFont();
-    currentFont.setFamily(font);
-    m_editor->textEdit()->setCurrentFont(currentFont);
+    m_editor->execCommand("fontName", font);
 }
 
 void MonasteryFrame::onSizeChanged(const QString &size) {
-    bool ok;
-    int pointSize = size.toInt(&ok);
-    if (ok) {
-        QTextCharFormat format = m_editor->textEdit()->currentCharFormat();
-        format.setFontPointSize(pointSize);
-        m_editor->textEdit()->mergeCurrentCharFormat(format);
-    }
+    bool ok = false;
+    const int pt = size.toInt(&ok);
+    if (!ok || pt <= 0)
+        return;
+    m_editor->applyFontSize(pt);
 }
 
 void MonasteryFrame::updateWordCount() {
-    QString text = m_editor->textEdit()->toPlainText();
-    QStringList words = text.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
-    m_wordCountLabel->setText(QString("Words: %1").arg(words.count()));
+    m_editor->requestWordCount([this](int count) {
+        m_wordCountLabel->setText(QString("Words: %1").arg(count));
+    });
 }
 
 void MonasteryFrame::closeEvent(QCloseEvent *event) {
-    if (m_editor->textEdit()->document()->isModified()) {
-        QMessageBox::StandardButton reply = QMessageBox::question(this, "Unsaved Changes",
-            "Document has unsaved changes. Save before exiting?", QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel);
-        if (reply == QMessageBox::Cancel) {
-            event->ignore();
-            return;
-        }
-        if (reply == QMessageBox::Yes) onSave();
+    if (!confirmProceedIfDirty()) {
+        event->ignore();
+        return;
     }
     event->accept();
 }
@@ -945,13 +966,8 @@ void MonasteryFrame::onSaveAs() {
     if (fileName.isEmpty()) return;
     if (!fileName.endsWith(".html")) fileName += ".html";
     m_currentFilePath = fileName;
-    QFile file(fileName);
-    if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        QTextStream out(&file);
-        out << m_editor->textEdit()->toHtml();
-        m_editor->textEdit()->document()->setModified(false);
-        m_statusBar->showMessage("Saved to " + fileName);
-    }
+    if (saveNow())
+        updateTitleBar();
 }
 
 QIcon MonasteryFrame::createToolbarIcon(const QString &symbol) {
@@ -962,4 +978,420 @@ QIcon MonasteryFrame::createToolbarIcon(const QString &symbol) {
     p.setFont(QFont("Noto Sans", 11, QFont::Bold));
     p.drawText(pix.rect(), Qt::AlignCenter, symbol);
     return QIcon(pix);
+}
+
+void MonasteryFrame::onToggleNarrowMargins() {
+    m_narrowMargins = m_narrowMarginsAction->isChecked();
+
+    // Change padding on the .page element live in the web view
+    QString padding;
+    if (m_currentTheme.pageAsObject)
+        padding = m_narrowMargins ? "0.5in 0.5in" : "1in 0.85in";
+    else
+        padding = m_narrowMargins ? "0.5in 0.5in" : "0.75in";
+
+    QString js = QString("var p = document.querySelector('.page'); if (p) p.style.padding = '%1';").arg(padding);
+    m_editor->webView()->page()->runJavaScript(js);
+
+    m_statusBar->showMessage(m_narrowMargins ? "Narrow margins enabled" : "Standard margins");
+}
+
+bool MonasteryFrame::hasNamedDocument() const {
+    return !m_currentFilePath.isEmpty() && !m_currentFilePath.contains("Monastery_AutoSave.html");
+}
+
+QString MonasteryFrame::documentDisplayName() const {
+    if (!hasNamedDocument())
+        return QStringLiteral("Untitled");
+    return QFileInfo(m_currentFilePath).fileName();
+}
+
+QString MonasteryFrame::autosaveSidecarPath() const {
+    const QFileInfo info(m_currentFilePath);
+    return info.absolutePath() + "/" + info.completeBaseName() + "_autosave.html";
+}
+
+void MonasteryFrame::updateTitleBar() {
+    const bool dirty = m_editor && m_editor->isDirty();
+    QString title = QStringLiteral("Monastery — ") + documentDisplayName();
+    if (dirty)
+        title += QStringLiteral(" *");
+    if (m_titleLabel)
+        m_titleLabel->setText(title);
+    setWindowTitle(title);
+}
+
+bool MonasteryFrame::htmlLooksEmpty(const QString &html) const {
+    QString t = html;
+    t.replace(QRegularExpression("<[^>]+>"), QStringLiteral(" "));
+    t.replace(QStringLiteral("&nbsp;"), QStringLiteral(" "));
+    t.replace(QStringLiteral("&#160;"), QStringLiteral(" "));
+    return t.trimmed().isEmpty();
+}
+
+bool MonasteryFrame::wouldClobberManuscript(const QString &incoming) const {
+    if (htmlLooksEmpty(incoming))
+        return true;
+    const QString lastGood = m_editor ? m_editor->lastGoodHtml() : QString();
+    if (lastGood.size() > 200 && incoming.trimmed().size() * 10 < lastGood.size())
+        return true;
+    return false;
+}
+
+bool MonasteryFrame::writeHtmlFile(const QString &path, const QString &html) {
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QMessageBox::warning(this, "Save Failed",
+                             "Could not write:\n" + path + "\n" + file.errorString());
+        return false;
+    }
+    QTextStream out(&file);
+    out.setEncoding(QStringConverter::Utf8);
+    out << html;
+    out.flush();
+    file.close();
+    if (file.error() != QFile::NoError) {
+        QMessageBox::warning(this, "Save Failed",
+                             "Could not finish writing:\n" + path + "\n" + file.errorString());
+        return false;
+    }
+    return true;
+}
+
+bool MonasteryFrame::persistDocument(const QString &path, const QString &html, bool markCleanAfter) {
+    if (wouldClobberManuscript(html)) {
+        m_statusBar->showMessage("Save skipped — empty or incomplete editor content. Last good copy kept.");
+        return false;
+    }
+    if (!writeHtmlFile(path, html))
+        return false;
+    m_statusBar->showMessage("Saved to " + path);
+    if (markCleanAfter) {
+        m_editor->markClean();
+        updateTitleBar();
+    }
+    return true;
+}
+
+bool MonasteryFrame::ensureSavePath() {
+    if (hasNamedDocument())
+        return true;
+    QString fileName = QFileDialog::getSaveFileName(this, "Save HTML", m_docsDir, "HTML files (*.html)", nullptr, QFileDialog::DontUseNativeDialog);
+    if (fileName.isEmpty())
+        return false;
+    if (!fileName.endsWith(".html"))
+        fileName += ".html";
+    m_currentFilePath = fileName;
+    updateTitleBar();
+    return true;
+}
+
+bool MonasteryFrame::saveNow() {
+    if (!ensureSavePath())
+        return false;
+
+    auto done = std::make_shared<bool>(false);
+    auto ok = std::make_shared<bool>(false);
+    m_editor->fetchHtml([this, done, ok](const QString &html) {
+        *ok = persistDocument(m_currentFilePath, html, true);
+        *done = true;
+    });
+    if (!*done) {
+        QEventLoop loop;
+        QTimer pump;
+        pump.setInterval(15);
+        QObject::connect(&pump, &QTimer::timeout, [&]() {
+            if (*done)
+                loop.quit();
+        });
+        pump.start();
+        QTimer::singleShot(2000, &loop, &QEventLoop::quit);
+        loop.exec();
+    }
+    if (!*done)
+        *ok = persistDocument(m_currentFilePath, m_editor->lastGoodHtml(), true);
+    return *ok;
+}
+
+bool MonasteryFrame::confirmProceedIfDirty() {
+    const bool dirty = m_editor->isDirty() || m_editor->queryDirtyNow();
+    if (!dirty)
+        return true;
+
+    const QMessageBox::StandardButton reply = QMessageBox::question(
+        this, "Unsaved Changes",
+        "Document has unsaved changes. Save before continuing?",
+        QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel);
+    if (reply == QMessageBox::Cancel)
+        return false;
+    if (reply == QMessageBox::Yes)
+        return saveNow();
+    return true;
+}
+
+void MonasteryFrame::maybeRestoreAutosave() {
+    if (m_didOfferRestore)
+        return;
+    m_didOfferRestore = true;
+
+    const QString path = m_docsDir + "/Monastery_AutoSave.html";
+    QFile file(path);
+    if (!file.exists())
+        return;
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+        return;
+    const QString html = QString::fromUtf8(file.readAll());
+    if (htmlLooksEmpty(html))
+        return;
+
+    const auto reply = QMessageBox::question(
+        this, "Restore Autosave",
+        "An autosaved document was found. Restore it?",
+        QMessageBox::Yes | QMessageBox::No);
+    if (reply != QMessageBox::Yes)
+        return;
+
+    m_editor->setHtml(html);
+    m_currentFilePath.clear();
+    m_editor->markDirty();
+    updateTitleBar();
+    m_statusBar->showMessage("Restored autosave");
+    updateWordCount();
+}
+
+void MonasteryFrame::setupFindDialog() {
+    if (m_findDialog)
+        return;
+
+    m_findDialog = new QDialog(this);
+    m_findDialog->setWindowTitle("Find");
+    m_findDialog->setModal(false);
+    QVBoxLayout *layout = new QVBoxLayout(m_findDialog);
+    QLabel *label = new QLabel("Find:");
+    m_findEdit = new QLineEdit(m_findDialog);
+    layout->addWidget(label);
+    layout->addWidget(m_findEdit);
+
+    QHBoxLayout *buttons = new QHBoxLayout;
+    QPushButton *nextBtn = new QPushButton("Next");
+    QPushButton *prevBtn = new QPushButton("Previous");
+    QPushButton *closeBtn = new QPushButton("Close");
+    buttons->addWidget(prevBtn);
+    buttons->addWidget(nextBtn);
+    buttons->addWidget(closeBtn);
+    layout->addLayout(buttons);
+
+    connect(nextBtn, &QPushButton::clicked, this, &MonasteryFrame::onFindNext);
+    connect(prevBtn, &QPushButton::clicked, this, &MonasteryFrame::onFindPrevious);
+    connect(closeBtn, &QPushButton::clicked, m_findDialog, &QDialog::hide);
+    connect(m_findEdit, &QLineEdit::returnPressed, this, &MonasteryFrame::onFindNext);
+}
+
+void MonasteryFrame::runFind(bool backward) {
+    if (!m_findEdit)
+        return;
+    const QString needle = m_findEdit->text();
+    if (needle.isEmpty())
+        return;
+    QWebEnginePage::FindFlags flags{};
+    if (backward)
+        flags |= QWebEnginePage::FindBackward;
+    m_editor->webView()->page()->findText(needle, flags);
+}
+
+void MonasteryFrame::onFind() {
+    setupFindDialog();
+    m_findDialog->show();
+    m_findDialog->raise();
+    m_findEdit->setFocus();
+    m_findEdit->selectAll();
+}
+
+void MonasteryFrame::onFindNext() {
+    runFind(false);
+}
+
+void MonasteryFrame::onFindPrevious() {
+    runFind(true);
+}
+
+void MonasteryFrame::onToggleFocusMode() {
+    m_focusMode = m_focusModeAction->isChecked();
+    if (m_menuBar)
+        m_menuBar->setVisible(!m_focusMode);
+    if (m_toolBar)
+        m_toolBar->setVisible(!m_focusMode);
+    if (m_statusBar)
+        m_statusBar->setVisible(!m_focusMode);
+}
+
+
+void MonasteryFrame::applyUiFont(const Theme &theme)
+{
+    QFont ui;
+    if (theme.themeId == ThemeId::WordPerfect)
+        ui.setFamilies({"IBM Plex Mono", "Fixed", "Courier New", "DejaVu Sans Mono", "sans-serif"});
+    else if (theme.themeId == ThemeId::Leather)
+        ui.setFamilies({"Noto Serif", "Georgia", "serif"});
+    else
+        ui.setFamilies({"Courier New", "Liberation Mono", "DejaVu Sans Mono", "monospace"});
+    ui.setPointSize(10);
+    setFont(ui);
+    if (m_titleLabel) {
+        QFont title = ui;
+        title.setPointSize(10);
+        title.setBold(true);
+        m_titleLabel->setFont(title);
+    }
+    if (m_statusBar) {
+        QFont status = ui;
+        status.setPointSize(8);
+        m_statusBar->setFont(status);
+    }
+    if (m_wordCountLabel)
+        m_wordCountLabel->setFont(m_statusBar ? m_statusBar->font() : ui);
+}
+
+void MonasteryFrame::colorizeToolbarIcons(const Theme &theme)
+{
+    const QColor tint(theme.accent);
+    auto tinted = [tint](const QString &path) {
+        QPixmap src(path);
+        if (src.isNull())
+            return QIcon();
+        QPixmap dest(src.size());
+        dest.fill(Qt::transparent);
+        QPainter p(&dest);
+        p.drawPixmap(0, 0, src);
+        p.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        p.fillRect(dest.rect(), tint);
+        p.end();
+        return QIcon(dest);
+    };
+
+    m_newAction->setIcon(tinted(QStringLiteral(":/icons/new.png")));
+    m_openAction->setIcon(tinted(QStringLiteral(":/icons/open.png")));
+    m_saveAction->setIcon(tinted(QStringLiteral(":/icons/save.png")));
+    m_boldAction->setIcon(tinted(QStringLiteral(":/icons/bold.png")));
+    m_italicAction->setIcon(tinted(QStringLiteral(":/icons/italic.png")));
+    m_underlineAction->setIcon(tinted(QStringLiteral(":/icons/underline.png")));
+    m_alignLeftAction->setIcon(tinted(QStringLiteral(":/icons/alignleft.png")));
+    m_alignCenterAction->setIcon(tinted(QStringLiteral(":/icons/aligncenter.png")));
+    m_alignRightAction->setIcon(tinted(QStringLiteral(":/icons/alignright.png")));
+    m_justifyAction->setIcon(tinted(QStringLiteral(":/icons/justify.png")));
+    m_bulletAction->setIcon(tinted(QStringLiteral(":/icons/bullet.png")));
+    m_numberAction->setIcon(tinted(QStringLiteral(":/icons/numbered.png")));
+}
+
+void MonasteryFrame::applyTheme(ThemeId id)
+{
+    const Theme t = themeForId(id);
+    m_currentTheme = t;
+    applyUiFont(t);
+
+    const QString chromeFg = t.pageAsObject ? t.pageBg : t.textOnChrome;
+    const QString btnCss = QStringLiteral("border: none; background: transparent; color: %1;").arg(t.textOnChrome);
+
+    setStyleSheet(QStringLiteral("QWidget { background-color: %1; }").arg(t.chromeBg));
+
+    if (m_titleBar)
+        m_titleBar->setStyleSheet(QStringLiteral("background-color: %1;").arg(t.chromeBg));
+    if (m_titleLabel)
+        m_titleLabel->setStyleSheet(QStringLiteral("color: %1;").arg(t.textOnChrome));
+    if (m_minBtn)
+        m_minBtn->setStyleSheet(btnCss);
+    if (m_maxBtn)
+        m_maxBtn->setStyleSheet(btnCss);
+    if (m_closeBtn)
+        m_closeBtn->setStyleSheet(btnCss);
+
+    if (m_menuBar) {
+        m_menuBar->setStyleSheet(QStringLiteral(
+            "QMenuBar { background-color: %1; color: %2; }"
+            "QMenuBar::item { background-color: transparent; color: %2; padding: 4px 8px; }"
+            "QMenuBar::item:selected { background-color: %3; color: %4; }"
+            "QMenu { background-color: %5; color: %6; border: 1px solid %7; }"
+            "QMenu::item { background-color: transparent; color: %6; }"
+            "QMenu::item:selected { background-color: %3; color: %4; }"
+            "QMenu::separator { height: 1px; background: %7; }")
+            .arg(t.menuBarBg, t.menuBarText, t.menuSelectedBg, t.menuSelectedFg,
+                 t.themeId == ThemeId::WordPerfect ? t.menuBarBg : t.chromeBg,
+                 t.themeId == ThemeId::WordPerfect ? t.menuBarText : t.textOnChrome,
+                 t.chromeLo));
+    }
+
+    if (m_toolBar) {
+        m_toolBar->setStyleSheet(QStringLiteral(
+            "QToolBar {"
+            "  background-color: %1;"
+            "  border-left: 8px solid %2;"
+            "  border-right: 8px solid %2;"
+            "  border-top: 0;"
+            "  border-bottom: 0;"
+            "  padding: 4px 0;"
+            "}"
+            "QToolButton { background-color: transparent; border: none; padding: 2px; }"
+            "QToolButton:hover { background-color: %3; border-radius: 2px; }"
+            "QToolButton:pressed { background-color: %4; }"
+            "QComboBox { background-color: %4; color: %5; border: 1px solid %3; border-radius: 2px; padding: 2px; min-width: 60px; }"
+            "QComboBox:hover { background-color: %3; }"
+            "QComboBox::drop-down { border: none; background-color: %4; }"
+            "QComboBox::down-arrow { image: none; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 4px solid %5; margin-right: 4px; }"
+            "QComboBox QAbstractItemView { background-color: %2; color: %5; border: 1px solid %4; selection-background-color: %3; selection-color: %5; }")
+            .arg(t.chromeMid, t.chromeBg, t.chromeHi, t.chromeLo, chromeFg));
+    }
+
+    if (m_statusBar)
+        m_statusBar->setStyleSheet(QStringLiteral("background-color: %1; color: %2;").arg(t.chromeBg, t.textOnChrome));
+    if (m_wordCountLabel)
+        m_wordCountLabel->setStyleSheet(QStringLiteral("color: %1;").arg(t.textOnChrome));
+
+    const QString menuBg = (t.themeId == ThemeId::WordPerfect) ? t.menuBarBg : t.chromeMid;
+    const QString menuFg = (t.themeId == ThemeId::WordPerfect) ? t.menuBarText : t.textOnChrome;
+    QString dialogCss = QStringLiteral(
+        "QMessageBox { background-color: __BG__; color: __FG__; }"
+        "QMessageBox QLabel { color: __FG__; font-weight: bold; }"
+        "QMessageBox QPushButton { background-color: __MID__; color: __FG__; border: 1px solid __BG__; padding: 5px; }"
+        "QMessageBox QPushButton:hover { background-color: __HI__; }"
+        "QFileDialog { background-color: __BG__; color: __FG__; }"
+        "QFileDialog QLabel, QFileDialog QLineEdit, QFileDialog QTreeView, QFileDialog QListView, QFileDialog QComboBox, QFileDialog QHeaderView::section { color: __FG__; background-color: __BG__; }"
+        "QFileDialog QPushButton { background-color: __MID__; color: __FG__; border: 1px solid __BG__; padding: 4px 8px; }"
+        "QFileDialog QPushButton:hover { background-color: __HI__; }"
+        "QMenu { background-color: __MENUBG__; color: __MENUFG__; border: 1px solid __BG__; }"
+        "QMenu::item:selected { background-color: __SELBG__; color: __SELFG__; }"
+        "QDialog { background-color: __BG__; color: __FG__; }"
+        "QDialog QLabel { color: __FG__; }"
+        "QLineEdit { background-color: __LO__; color: __CHROMEFG__; border: 1px solid __HI__; padding: 4px; }"
+        "QDialog QPushButton { background-color: __MID__; color: __FG__; border: 1px solid __BG__; padding: 5px; }");
+    dialogCss.replace(QStringLiteral("__BG__"), t.chromeBg);
+    dialogCss.replace(QStringLiteral("__FG__"), t.textOnChrome);
+    dialogCss.replace(QStringLiteral("__MID__"), t.chromeMid);
+    dialogCss.replace(QStringLiteral("__HI__"), t.chromeHi);
+    dialogCss.replace(QStringLiteral("__LO__"), t.chromeLo);
+    dialogCss.replace(QStringLiteral("__MENUBG__"), menuBg);
+    dialogCss.replace(QStringLiteral("__MENUFG__"), menuFg);
+    dialogCss.replace(QStringLiteral("__SELBG__"), t.menuSelectedBg);
+    dialogCss.replace(QStringLiteral("__SELFG__"), t.menuSelectedFg);
+    dialogCss.replace(QStringLiteral("__CHROMEFG__"), chromeFg);
+    qApp->setStyleSheet(dialogCss);
+
+    colorizeToolbarIcons(t);
+
+    if (m_themeGroup) {
+        const QSignalBlocker blocker(m_themeGroup);
+        for (QAction *action : m_themeGroup->actions())
+            action->setChecked(action->data().toString() == t.id);
+    }
+
+    if (m_editor)
+        m_editor->applyTheme(t);
+
+    if (m_editor && m_narrowMargins) {
+        const QString padding = QStringLiteral("0.5in 0.5in");
+        m_editor->webView()->page()->runJavaScript(
+            QStringLiteral("var p = document.querySelector('.page'); if (p) p.style.padding = '%1';").arg(padding));
+    }
+
+    QSettings settings(QStringLiteral("Monastery"), QStringLiteral("Monastery"));
+    settings.setValue(QStringLiteral("theme"), t.id);
 }

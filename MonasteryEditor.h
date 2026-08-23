@@ -2,52 +2,49 @@
 #define MONASTERYEDITOR_H
 
 #include <QWidget>
-#include <QSyntaxHighlighter>
-#include <QString>
-#include <hunspell/hunspell.h>
-
-class QLabel;
-class QTextEdit;
-class QTextDocument;
-
-typedef Hunhandle Hunspell;
-
-class HunspellHighlighter : public QSyntaxHighlighter {
-    Q_OBJECT
-
-public:
-    HunspellHighlighter(QTextDocument *parent, const QString &userDicPath);
-    ~HunspellHighlighter();
-
-    void addWord(const QString &word);
-    void reloadDictionary();   // new: forces full reload
-    bool isMisspelled(const QString &word);
-
-protected:
-    void highlightBlock(const QString &text) override;
-
-private:
-    Hunspell *m_hunspell = nullptr;
-    QString m_userDicPath;
-};
+#include <QWebEngineView>
+#include <QWebEnginePage>
+#include <QTimer>
+#include <functional>
+#include "Theme.h"
 
 class MonasteryEditor : public QWidget {
     Q_OBJECT
-
 public:
-    MonasteryEditor(QWidget *parent = nullptr);
-    QTextEdit* textEdit() { return m_textEdit; }
-    void toggleRuler(bool show);
-    void refreshHighlighter();   // new method to force reload
+    explicit MonasteryEditor(QWidget *parent = nullptr);
+    void execCommand(const QString &cmd, const QString &value = QString());
+    QString getHtml();
+    void setHtml(const QString &html);
+    int getWordCount();
+    void refreshHighlighter();
 
-private slots:
-    void showContextMenu(const QPoint &pos);
+    QWebEngineView* webView() const { return m_webView; }
+
+    void fetchHtml(const std::function<void(const QString &)> &callback);
+    void requestWordCount(const std::function<void(int)> &callback);
+    bool queryDirtyNow();
+    void markClean();
+    void markDirty();
+    bool isDirty() const { return m_dirty; }
+    QString lastGoodHtml() const { return m_cachedHtml; }
+    void applyFontSize(int pointSize);
+    void applyTheme(const Theme &theme);
+
+signals:
+    void wordCountChanged(int count);
+    void dirtyChanged(bool dirty);
+    void ready(bool ok);
 
 private:
-    QLabel *m_ruler;
-    QTextEdit *m_textEdit;
-    HunspellHighlighter *m_highlighter = nullptr;
-    QString m_userDicPath;
+    void considerHtmlCache(const QString &html);
+    void pollEditorState();
+
+    QWebEngineView *m_webView;
+    QTimer *m_pollTimer;
+    int m_cachedWordCount = 0;
+    QString m_cachedHtml;
+    bool m_isLoaded = false;
+    bool m_dirty = false;
 };
 
 #endif // MONASTERYEDITOR_H

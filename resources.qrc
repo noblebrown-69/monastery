@@ -13,5 +13,6 @@
         <file>icons/open.png</file>
         <file>icons/save.png</file>
         <file>icons/monastery.png</file>
+        <file>editor.html</file>
     </qresource>
 </RCC>

@@ -9,7 +9,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets PrintSupport)
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets PrintSupport WebEngineWidgets)
 
 find_path(HUNSPELL_INCLUDE_DIR hunspell/hunspell.h)
 find_library(HUNSPELL_LIBRARY hunspell-1.7)
@@ -22,11 +22,12 @@ qt_add_executable(Monastery
     main.cpp
     MonasteryFrame.cpp
     MonasteryEditor.cpp
+    Theme.cpp
 )
 
 target_sources(Monastery PRIVATE resources.qrc)
 
-target_link_libraries(Monastery PRIVATE Qt6::Core Qt6::Widgets Qt6::PrintSupport ${HUNSPELL_LIBRARY})
+target_link_libraries(Monastery PRIVATE Qt6::Core Qt6::Widgets Qt6::PrintSupport Qt6::WebEngineWidgets ${HUNSPELL_LIBRARY})
 
 set_target_properties(Monastery PROPERTIES
     WIN32_EXECUTABLE TRUE

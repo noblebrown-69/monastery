@@ -6,6 +6,15 @@
 #include <QMouseEvent>
 #include <QResizeEvent>
 #include <QLabel>
+#include <QMenuBar>
+#include <QToolBar>
+#include <QStatusBar>
+#include <QAction>
+#include <QDialog>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QActionGroup>
+#include "Theme.h"
 
 class MonasteryEditor;
 
@@ -47,6 +56,15 @@ private slots:
     void onPrint();
     void onInsertPageBreak();
     void updateWordCount();
+    void onToggleNarrowMargins();
+    void onFind();
+    void onFindNext();
+    void onFindPrevious();
+    void onToggleFocusMode();
+    void maybeRestoreAutosave();
+    void updateTitleBar();
+    void applyTheme(ThemeId id);
+
 
 private:
     void createActions();
@@ -55,12 +73,49 @@ private:
     void createStatusBar();
     void createDocsFolder();
     QIcon createToolbarIcon(const QString &symbol);
+    void colorizeToolbarIcons(const Theme &theme);
+    void applyUiFont(const Theme &theme);
+
+
+    bool confirmProceedIfDirty();
+    bool hasNamedDocument() const;
+    QString documentDisplayName() const;
+    QString autosaveSidecarPath() const;
+    bool htmlLooksEmpty(const QString &html) const;
+    bool wouldClobberManuscript(const QString &incoming) const;
+    bool writeHtmlFile(const QString &path, const QString &html);
+    bool persistDocument(const QString &path, const QString &html, bool markCleanAfter);
+    bool ensureSavePath();
+    bool saveNow();
+    void setupFindDialog();
+    void runFind(bool backward);
 
     MonasteryEditor *m_editor;
     QTimer *m_autoSaveTimer;
+    QTimer *m_wordCountPollTimer;
+    bool m_narrowMargins = false;
     QString m_docsDir;
     QString m_currentFilePath;
     QRect m_normalGeometry;
+
+    QWidget *m_titleBar = nullptr;
+    QLabel *m_titleLabel = nullptr;
+    QPushButton *m_minBtn = nullptr;
+    QPushButton *m_maxBtn = nullptr;
+    QPushButton *m_closeBtn = nullptr;
+    QMenuBar *m_menuBar = nullptr;
+    QToolBar *m_toolBar = nullptr;
+    QStatusBar *m_statusBar = nullptr;
+    QActionGroup *m_themeGroup = nullptr;
+    Theme m_currentTheme;
+
+    QPoint m_dragPosition;
+    bool m_dragging = false;
+    bool m_focusMode = false;
+    bool m_didOfferRestore = false;
+
+    QDialog *m_findDialog = nullptr;
+    QLineEdit *m_findEdit = nullptr;
 
     // Resize handling
     bool m_resizing;
@@ -92,6 +147,9 @@ private:
     QAction *m_cutAction;
     QAction *m_copyAction;
     QAction *m_pasteAction;
+    QAction *m_narrowMarginsAction;
+    QAction *m_findAction;
+    QAction *m_focusModeAction;
     QLabel *m_wordCountLabel;
 };
 
