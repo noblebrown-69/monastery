@@ -4,6 +4,7 @@
 #include <QWebEngineView>
 #include <QWebEnginePage>
 #include <QWebEngineSettings>
+#include <QWebEngineProfile>
 #include <QEventLoop>
 #include <QTimer>
 #include <QVariant>
@@ -11,6 +12,45 @@
 #include <QJsonDocument>
 #include <QDebug>
 #include <QRegularExpression>
+
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonParseError>
+#include <QVariantMap>
+
+struct FontProbe {
+    QString family;
+    int pt = 0;
+    QString caretFamily;
+    int caretPt = 0;
+    bool found = false;
+};
+
+static FontProbe parseFontProbe(const QVariant &result)
+{
+    QVariantMap m = result.toMap();
+    if (m.isEmpty() && result.canConvert<QString>()) {
+        const QString s = result.toString().trimmed();
+        if (s.startsWith(QLatin1Char('{'))) {
+            QJsonParseError err;
+            const QJsonDocument doc = QJsonDocument::fromJson(s.toUtf8(), &err);
+            if (err.error == QJsonParseError::NoError)
+                m = doc.object().toVariantMap();
+        }
+    }
+    FontProbe p;
+    p.family = m.value(QStringLiteral("family")).toString().trimmed();
+    p.pt = m.value(QStringLiteral("pt")).toInt();
+    p.caretFamily = m.value(QStringLiteral("caretFamily")).toString().trimmed();
+    p.caretPt = m.value(QStringLiteral("caretPt")).toInt();
+    p.found = m.value(QStringLiteral("found")).toBool();
+    if (p.caretFamily.isEmpty())
+        p.caretFamily = p.family;
+    if (p.caretPt <= 0)
+        p.caretPt = p.pt;
+    return p;
+}
+
 
 static QString jsStringLiteral(const QString &value)
 {
@@ -42,6 +82,17 @@ MonasteryEditor::MonasteryEditor(QWidget *parent) : QWidget(parent)
     settings->setAttribute(QWebEngineSettings::PluginsEnabled, false);
     settings->setAttribute(QWebEngineSettings::AutoLoadImages, true);
     settings->setAttribute(QWebEngineSettings::PrintElementBackgrounds, false);
+
+    // Qt WebEngine / Chromium spellcheck (needs en-US.bdic on QTWEBENGINE_DICTIONARIES_PATH).
+    {
+        QWebEngineProfile *profile = page->profile();
+        profile->setSpellCheckEnabled(true);
+        profile->setSpellCheckLanguages({QStringLiteral("en-US")});
+        qInfo().nospace()
+            << "spellcheck: enabled=" << profile->isSpellCheckEnabled()
+            << " languages=" << profile->spellCheckLanguages()
+            << " dictPath=" << qgetenv("QTWEBENGINE_DICTIONARIES_PATH");
+    }
 
     m_webView->load(QUrl("qrc:/editor.html"));
     m_webView->setStyleSheet("QWebEngineView { background: #3C2F2F; border: none; }");
@@ -100,6 +151,52 @@ void MonasteryEditor::pollEditorState()
             emit dirtyChanged(m_dirty);
         }
     });
+
+    pollSelectionFont();
+}
+
+void MonasteryEditor::pollSelectionFont()
+{
+    if (!m_isLoaded)
+        return;
+    m_webView->page()->runJavaScript(
+        QStringLiteral("typeof getSelectionFont==='function'?getSelectionFont():null"),
+        [this](const QVariant &result) {
+            const FontProbe p = parseFontProbe(result);
+            if (p.family.isEmpty() && p.pt <= 0)
+                return;
+            if (p.family == m_cachedSelFamily && p.pt == m_cachedSelPt)
+                return;
+            m_cachedSelFamily = p.family;
+            m_cachedSelPt = p.pt;
+            emit selectionFontChanged(p.family, p.pt);
+        });
+}
+
+void MonasteryEditor::requestHeadingFont(const std::function<void(const QString &, int,
+                                                                 const QString &, int,
+                                                                 bool)> &callback)
+{
+    if (!m_isLoaded) {
+        if (callback)
+            callback(QString(), 0, QString(), 0, false);
+        return;
+    }
+    m_webView->page()->runJavaScript(
+        QStringLiteral("typeof getHeadingFont==='function'?getHeadingFont():null"),
+        [callback](const QVariant &result) {
+            const FontProbe p = parseFontProbe(result);
+            if (callback)
+                callback(p.family, p.pt, p.caretFamily, p.caretPt, p.found);
+        });
+}
+
+
+void MonasteryEditor::insertChecklist()
+{
+    if (!m_isLoaded) return;
+    m_webView->page()->runJavaScript(QStringLiteral("insertChecklist();"));
+    markDirty();
 }
 
 void MonasteryEditor::execCommand(const QString &cmd, const QString &value)
@@ -150,6 +247,7 @@ void MonasteryEditor::setHtml(const QString &html)
     }
 
     m_webView->page()->runJavaScript(QString("setContent(%1);").arg(jsStringLiteral(html)));
+    QTimer::singleShot(80, this, [this]() { pollSelectionFont(); });
 }
 
 int MonasteryEditor::getWordCount()
@@ -218,10 +316,23 @@ void MonasteryEditor::applyFontSize(int pointSize)
     markDirty();
 }
 
+void MonasteryEditor::applyFontFamily(const QString &name)
+{
+    if (!m_isLoaded) return;
+    m_webView->page()->runJavaScript(QString("applyFontFamily(%1);").arg(jsStringLiteral(name)));
+    markDirty();
+}
+
 void MonasteryEditor::refreshHighlighter()
 {
-    // Chromium native spellcheck (contenteditable spellcheck="true").
-    // Hunspell remains linked for later dictionary work.
+    // Re-assert Qt WebEngine profile spellcheck (contenteditable has spellcheck="true").
+    // Hunspell remains linked for later dictionary work; underlines use Chromium .bdic.
+    if (!m_webView || !m_webView->page() || !m_webView->page()->profile())
+        return;
+    QWebEngineProfile *profile = m_webView->page()->profile();
+    profile->setSpellCheckEnabled(true);
+    if (profile->spellCheckLanguages().isEmpty())
+        profile->setSpellCheckLanguages({QStringLiteral("en-US")});
 }
 
 void MonasteryEditor::applyTheme(const Theme &t)

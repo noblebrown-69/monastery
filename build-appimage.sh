@@ -34,7 +34,7 @@ chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-qt-x86_64.AppImage
 
 export QMAKE=/usr/bin/qmake6
 export APPIMAGE_EXTRACT_AND_RUN=1
-export PATH="$PWD:$PATH"
+export PATH="$HOME/.local/opt/qt6-webengine/usr/lib/qt6/libexec:$PWD:$PATH"
 export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/qt6${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 # Encourage linuxdeploy-plugin-qt to pull extra WebEngine-related plugins
 export EXTRA_QT_PLUGINS="${EXTRA_QT_PLUGINS:-webview;qmltooling;position}"
@@ -87,8 +87,49 @@ copy_hunspell() {
     fi
 }
 
+copy_bdic() {
+    # Chromium/Qt WebEngine spellcheck dictionaries (.bdic), not raw Hunspell.
+    local dest="AppDir/usr/share/qtwebengine_dictionaries"
+    mkdir -p "$dest"
+    local src_bdic=""
+    if [ -f dictionaries/en-US.bdic ]; then
+        src_bdic="dictionaries/en-US.bdic"
+    elif [ -f "$HOME/.local/share/qtwebengine_dictionaries/en-US.bdic" ]; then
+        src_bdic="$HOME/.local/share/qtwebengine_dictionaries/en-US.bdic"
+    else
+        local convert="$HOME/.local/opt/qt6-webengine/usr/lib/qt6/libexec/qwebengine_convert_dict"
+        if [ -x "$convert" ] && [ -f /usr/share/hunspell/en_US.dic ] && [ -f /usr/share/hunspell/en_US.aff ]; then
+            local tmp
+            tmp="$(mktemp -d)"
+            cp /usr/share/hunspell/en_US.aff "$tmp/en-US.aff"
+            cp /usr/share/hunspell/en_US.dic "$tmp/en-US.dic"
+            if "$convert" "$tmp/en-US.dic" "$tmp/en-US.bdic"; then
+                mkdir -p dictionaries
+                cp -a "$tmp/en-US.bdic" dictionaries/en-US.bdic
+                src_bdic="dictionaries/en-US.bdic"
+            fi
+            rm -rf "$tmp"
+        fi
+    fi
+    if [ -n "$src_bdic" ] && [ -f "$src_bdic" ]; then
+        cp -a "$src_bdic" "$dest/en-US.bdic"
+        echo "Bundled spellcheck dictionary: $dest/en-US.bdic"
+    else
+        echo "WARNING: en-US.bdic not found; WebEngine spellcheck underlines may be missing."
+    fi
+}
+
+
 copy_webengine() {
     echo "Copying Qt WebEngine process, resources, locales, and libraries into AppDir..."
+    local we_prefix
+    if [ -x "${HOME}/.local/opt/qt6-webengine/usr/lib/qt6/libexec/QtWebEngineProcess" ]; then
+        we_prefix="${HOME}/.local/opt/qt6-webengine/usr"
+    else
+        we_prefix="/usr"
+    fi
+    echo "WE_PREFIX=${we_prefix}"
+
     mkdir -p AppDir/usr/lib/qt6/libexec
     mkdir -p AppDir/usr/libexec
     mkdir -p AppDir/usr/bin
@@ -96,26 +137,35 @@ copy_webengine() {
     mkdir -p AppDir/usr/share/qt6/translations/qtwebengine_locales
     mkdir -p AppDir/usr/lib
     mkdir -p AppDir/usr/lib/x86_64-linux-gnu
-
-    if [ -x /usr/lib/qt6/libexec/QtWebEngineProcess ]; then
-        cp -a /usr/lib/qt6/libexec/QtWebEngineProcess AppDir/usr/lib/qt6/libexec/
-        cp -a /usr/lib/qt6/libexec/QtWebEngineProcess AppDir/usr/libexec/
-        cp -a /usr/lib/qt6/libexec/QtWebEngineProcess AppDir/usr/bin/
-    fi
-
-    if [ -d /usr/share/qt6/resources ]; then
-        cp -a /usr/share/qt6/resources/. AppDir/usr/share/qt6/resources/
-    fi
-
-    if [ -d /usr/share/qt6/translations/qtwebengine_locales ]; then
-        cp -a /usr/share/qt6/translations/qtwebengine_locales/. AppDir/usr/share/qt6/translations/qtwebengine_locales/
-    fi
-
-    # Also place paks where some Qt builds look (next to libexec)
     mkdir -p AppDir/usr/lib/qt6/resources
-    cp -a /usr/share/qt6/resources/. AppDir/usr/lib/qt6/resources/ 2>/dev/null || true
+    mkdir -p AppDir/usr/resources
+    mkdir -p AppDir/usr/translations/qtwebengine_locales
 
-    local libdir="/usr/lib/x86_64-linux-gnu"
+    local we_proc="${we_prefix}/lib/qt6/libexec/QtWebEngineProcess"
+    if [ -x "${we_proc}" ]; then
+        cp -a "${we_proc}" AppDir/usr/lib/qt6/libexec/
+        cp -a "${we_proc}" AppDir/usr/libexec/
+        cp -a "${we_proc}" AppDir/usr/bin/
+    else
+        echo "WARNING: QtWebEngineProcess not found at ${we_proc}"
+    fi
+
+    local we_res="${we_prefix}/share/qt6/resources"
+    if [ -d "${we_res}" ]; then
+        cp -a "${we_res}"/. AppDir/usr/share/qt6/resources/
+        cp -a "${we_res}"/. AppDir/usr/lib/qt6/resources/
+        cp -a "${we_res}"/. AppDir/usr/resources/
+    else
+        echo "WARNING: WebEngine resources not found at ${we_res}"
+    fi
+
+    local we_loc="${we_prefix}/share/qt6/translations/qtwebengine_locales"
+    if [ -d "${we_loc}" ]; then
+        cp -a "${we_loc}"/. AppDir/usr/share/qt6/translations/qtwebengine_locales/
+        cp -a "${we_loc}"/. AppDir/usr/translations/qtwebengine_locales/
+    fi
+
+    local libdir lib
     local -a we_libs=(
         libQt6WebEngineWidgets.so.6
         libQt6WebEngineCore.so.6
@@ -129,14 +179,16 @@ copy_webengine() {
         libQt6OpenGL.so.6
         libQt6Network.so.6
     )
-    local lib
-    for lib in "${we_libs[@]}"; do
-        if [ -e "$libdir/$lib" ]; then
-            cp -a "$libdir/$lib"* AppDir/usr/lib/ 2>/dev/null || true
-            if [ -d AppDir/usr/lib/x86_64-linux-gnu ]; then
-                cp -a "$libdir/$lib"* AppDir/usr/lib/x86_64-linux-gnu/ 2>/dev/null || true
+    for libdir in "${we_prefix}/lib/x86_64-linux-gnu" "/usr/lib/x86_64-linux-gnu"; do
+        [ -d "${libdir}" ] || continue
+        for lib in "${we_libs[@]}"; do
+            if [ -e "${libdir}/${lib}" ]; then
+                cp -a "${libdir}/${lib}"* AppDir/usr/lib/ 2>/dev/null || true
+                if [ -d AppDir/usr/lib/x86_64-linux-gnu ]; then
+                    cp -a "${libdir}/${lib}"* AppDir/usr/lib/x86_64-linux-gnu/ 2>/dev/null || true
+                fi
             fi
-        fi
+        done
     done
 }
 
@@ -148,6 +200,7 @@ has_webengine() {
 }
 
 copy_hunspell
+copy_bdic
 
 if ! has_webengine; then
     echo "WARNING: QtWebEngineProcess or qtwebengine_resources.pak missing from AppDir."
@@ -158,16 +211,126 @@ if ! has_webengine; then
         run_linuxdeploy extract
     fi
     copy_hunspell
+    copy_bdic
     if ! has_webengine; then
         echo "WebEngine files still missing after re-run; copying again and rebuilding AppImage..."
         copy_webengine
         copy_hunspell
+    copy_bdic
         if ! run_linuxdeploy; then
             run_linuxdeploy extract
         fi
         copy_hunspell
+    copy_bdic
     fi
 fi
+
+# After linuxdeploy (which creates AppRun as a symlink to the binary), replace
+# it with a real script that sets QTWEBENGINE_* from $APPDIR, then re-squash
+# with appimagetool so linuxdeploy cannot recreate the symlink.
+install_qtwebengine_apprun() {
+    local bin_name="$1"
+    rm -f AppDir/AppRun
+    cat > AppDir/AppRun <<APPRUN_EOF
+#!/bin/bash
+HERE="\$(dirname "\$(readlink -f "\$0")")"
+export APPDIR="\$HERE"
+export LD_LIBRARY_PATH="\$HERE/usr/lib:\$HERE/usr/lib/x86_64-linux-gnu\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+export QT_PLUGIN_PATH="\$HERE/usr/plugins\${QT_PLUGIN_PATH:+:\$QT_PLUGIN_PATH}"
+if [ -x "\$HERE/usr/lib/qt6/libexec/QtWebEngineProcess" ]; then
+    export QTWEBENGINEPROCESS_PATH="\$HERE/usr/lib/qt6/libexec/QtWebEngineProcess"
+elif [ -x "\$HERE/usr/bin/QtWebEngineProcess" ]; then
+    export QTWEBENGINEPROCESS_PATH="\$HERE/usr/bin/QtWebEngineProcess"
+fi
+if [ -d "\$HERE/usr/share/qt6/resources" ]; then
+    export QTWEBENGINE_RESOURCES_PATH="\$HERE/usr/share/qt6/resources"
+elif [ -d "\$HERE/usr/lib/qt6/resources" ]; then
+    export QTWEBENGINE_RESOURCES_PATH="\$HERE/usr/lib/qt6/resources"
+elif [ -d "\$HERE/usr/resources" ]; then
+    export QTWEBENGINE_RESOURCES_PATH="\$HERE/usr/resources"
+fi
+export QTWEBENGINE_LOCALES_PATH="\$HERE/usr/share/qt6/translations/qtwebengine_locales"
+if [ -d "\$HERE/usr/share/qtwebengine_dictionaries" ]; then
+    export QTWEBENGINE_DICTIONARIES_PATH="\$HERE/usr/share/qtwebengine_dictionaries"
+fi
+export QTWEBENGINE_DISABLE_SANDBOX=1
+exec "\$HERE/usr/bin/${bin_name}" "\$@"
+APPRUN_EOF
+    chmod +x AppDir/AppRun
+}
+
+find_appimagetool() {
+    local candidate
+    local -a candidates=(
+        "/tmp/appimage_extracted_c13a8b6f65a3ddf1cad26656f509034a/plugins/linuxdeploy-plugin-appimage/appimagetool-prefix/usr/bin/appimagetool"
+    )
+    shopt -s nullglob
+    candidates+=(/tmp/appimage_extracted_*/plugins/linuxdeploy-plugin-appimage/appimagetool-prefix/usr/bin/appimagetool)
+    shopt -u nullglob
+    for candidate in "${candidates[@]}"; do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+resquash_appimage() {
+    local out="$1"
+    local bin_name="$2"
+    local tool=""
+    local extract_dir=""
+
+    install_qtwebengine_apprun "$bin_name"
+
+    if ! tool="$(find_appimagetool)"; then
+        echo "appimagetool not found; extracting linuxdeploy to locate it..."
+        extract_dir="$(mktemp -d /tmp/linuxdeploy-extract-XXXXXX)"
+        (
+            cd "$extract_dir"
+            APPIMAGE_EXTRACT_AND_RUN=1 "${OLDPWD}/linuxdeploy-x86_64.AppImage" --appimage-extract >/dev/null
+        ) || true
+        tool="$(find "$extract_dir" -name appimagetool -type f 2>/dev/null | head -n 1 || true)"
+        if [ -z "$tool" ] || [ ! -x "$tool" ]; then
+            echo "appimagetool still missing; running linuxdeploy --output appimage after AppRun replace..."
+            if ! run_linuxdeploy; then
+                run_linuxdeploy extract
+            fi
+            copy_hunspell
+    copy_bdic
+            if [ -L AppDir/AppRun ]; then
+                echo "linuxdeploy recreated AppRun symlink; restoring script..."
+                install_qtwebengine_apprun "$bin_name"
+            fi
+            tool="$(find_appimagetool || true)"
+            if [ -z "$tool" ] || [ ! -x "$tool" ]; then
+                echo "ERROR: could not locate appimagetool after linuxdeploy."
+                exit 1
+            fi
+        fi
+    fi
+
+    echo "Rebuilding AppImage with appimagetool: $tool"
+    ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$tool" --no-appstream AppDir "$out"
+
+    if [ -L AppDir/AppRun ]; then
+        echo "WARNING: AppRun became a symlink during squash; restoring and retrying..."
+        install_qtwebengine_apprun "$bin_name"
+        ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$tool" --no-appstream AppDir "$out"
+    fi
+
+    if [ -L AppDir/AppRun ]; then
+        echo "ERROR: AppDir/AppRun is still a symlink."
+        exit 1
+    fi
+    if ! grep -q QTWEBENGINEPROCESS_PATH AppDir/AppRun; then
+        echo "ERROR: AppDir/AppRun missing QTWEBENGINEPROCESS_PATH."
+        exit 1
+    fi
+}
+
+
 
 # Rename linuxdeploy output (desktop Name=Monastery)
 if [ -f Monastery-x86_64.AppImage ]; then
@@ -183,6 +346,9 @@ elif ls Monastery-*.AppImage >/dev/null 2>&1; then
     done
     shopt -u nullglob
 fi
+
+install_qtwebengine_apprun Monastery
+resquash_appimage Monastery.AppImage Monastery
 
 if [ ! -f Monastery.AppImage ]; then
     echo "ERROR: Monastery.AppImage was not produced."

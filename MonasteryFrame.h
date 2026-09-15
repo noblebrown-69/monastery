@@ -17,6 +17,11 @@
 #include "Theme.h"
 
 class MonasteryEditor;
+class QPlainTextEdit;
+class QStackedWidget;
+class QFontComboBox;
+class QComboBox;
+class QTemporaryFile;
 
 class MonasteryFrame : public QWidget {
     Q_OBJECT
@@ -25,6 +30,7 @@ public:
     MonasteryFrame(QWidget *parent = nullptr);
     ~MonasteryFrame();
     static QString getRealAppDir();
+    bool openPath(const QString &path);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -50,9 +56,11 @@ private slots:
     void onAlignRight();
     void onJustify();
     void onBulletList();
+    void onChecklist();
     void onNumberedList();
     void onFontChanged(const QString &font);
     void onSizeChanged(const QString &size);
+    void onSelectionFontChanged(const QString &family, int pt);
     void onPrint();
     void onInsertPageBreak();
     void updateWordCount();
@@ -87,10 +95,27 @@ private:
     bool persistDocument(const QString &path, const QString &html, bool markCleanAfter);
     bool ensureSavePath();
     bool saveNow();
+    bool saveMarkdownNow();
+    QString waitForEditorHtml();
+    bool loadHtmlDocument(const QString &path);
+    bool loadMarkdownDocument(const QString &path);
+    bool isMarkdownSourcePath(const QString &path) const;
+    bool isMarkdownMode() const;
+    void setMarkdownMode(bool on);
+    void setFormatActionsEnabled(bool on);
+    int askRestoreAutosave();
+    void emitListenHealth(const QString &openedPath, const QString &recovery);
+    void dumpListenSelectionFont();
+    void requestListenQuit();
+    void onPdfPrintingFinished(const QString &path, bool success);
+    bool maybeStartListenPrint();
+    bool documentIsDirty() const;
     void setupFindDialog();
     void runFind(bool backward);
 
     MonasteryEditor *m_editor;
+    QStackedWidget *m_editorStack = nullptr;
+    QPlainTextEdit *m_mdEdit = nullptr;
     QTimer *m_autoSaveTimer;
     QTimer *m_wordCountPollTimer;
     bool m_narrowMargins = false;
@@ -105,6 +130,8 @@ private:
     QPushButton *m_closeBtn = nullptr;
     QMenuBar *m_menuBar = nullptr;
     QToolBar *m_toolBar = nullptr;
+    QFontComboBox *m_fontCombo = nullptr;
+    QComboBox *m_sizeCombo = nullptr;
     QStatusBar *m_statusBar = nullptr;
     QActionGroup *m_themeGroup = nullptr;
     Theme m_currentTheme;
@@ -113,6 +140,15 @@ private:
     bool m_dragging = false;
     bool m_focusMode = false;
     bool m_didOfferRestore = false;
+    bool m_restoreDialogUp = false;
+    bool m_markdownMode = false;
+    bool m_listenQuitArmed = false;
+    bool m_listenPrintPending = false;
+    QTemporaryFile *m_printTemp = nullptr;
+    QString m_pendingLpPdf;
+    QString m_pendingLpPrinter;
+    int m_pendingLpCopies = 1;
+    QString m_pendingOpenPath;
 
     QDialog *m_findDialog = nullptr;
     QLineEdit *m_findEdit = nullptr;
@@ -141,6 +177,7 @@ private:
     QAction *m_justifyAction;
     QAction *m_bulletAction;
     QAction *m_numberAction;
+    QAction *m_checklistAction;
     QAction *m_pageBreakAction;
     QAction *m_undoAction;
     QAction *m_redoAction;

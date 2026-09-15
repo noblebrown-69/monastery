@@ -1,6 +1,7 @@
 #include "MonasteryFrame.h"
 #include "MonasteryEditor.h"
 #include "Theme.h"
+#include "DocumentIo.h"
 #include <QApplication>
 #include <algorithm>
 #include <memory>
@@ -23,8 +24,12 @@
 #include <QRegularExpression>
 #include <QPrinter>
 #include <QPrintDialog>
+#include <QPrinterInfo>
 #include <QPageLayout>
 #include <QPageSize>
+#include <QMarginsF>
+#include <QProcess>
+#include <QTemporaryFile>
 #include <QWebEnginePage>
 #include <QMouseEvent>
 #include <QResizeEvent>
@@ -43,6 +48,17 @@
 #include <QSignalBlocker>
 #include <QColor>
 #include <QFont>
+#include <QCoreApplication>
+#include <QList>
+#include <QPlainTextEdit>
+#include <QStackedWidget>
+#include <QSyntaxHighlighter>
+#include <QTextCharFormat>
+#include <QTextCursor>
+#include <QTextDocument>
+#include <QDialogButtonBox>
+#include <cstdio>
+#include <QElapsedTimer>
 
 // Embedded XPM icons for classic Word 6.0 look
 static const char *bold_xpm[] = {
@@ -260,6 +276,244 @@ static const char *number_xpm[] = {
 nullptr
 };
 
+
+static const QString kDocumentFilter =
+    QStringLiteral("Documents (*.html *.md *.markdown *.txt *.docx);;HTML (*.html);;Markdown (*.md *.markdown *.txt);;Word (*.docx)");
+
+static QString ensureDocumentSuffix(QString fileName)
+{
+    const QString lower = fileName.toLower();
+    if (lower.endsWith(QLatin1String(".html"))
+        || lower.endsWith(QLatin1String(".md"))
+        || lower.endsWith(QLatin1String(".markdown"))
+        || lower.endsWith(QLatin1String(".txt"))
+        || lower.endsWith(QLatin1String(".docx")))
+        return fileName;
+    return fileName + QStringLiteral(".html");
+}
+
+class MarkdownHighlighter : public QSyntaxHighlighter {
+public:
+    explicit MarkdownHighlighter(QTextDocument *parent = nullptr)
+        : QSyntaxHighlighter(parent)
+    {
+        m_heading.setForeground(QColor(QStringLiteral("#4E9A06")));
+        m_heading.setFontWeight(QFont::Bold);
+        m_bold.setForeground(QColor(QStringLiteral("#CC0000")));
+        m_bold.setFontWeight(QFont::Bold);
+        m_code.setForeground(QColor(QStringLiteral("#3465A4")));
+    }
+
+protected:
+    void highlightBlock(const QString &text) override
+    {
+        static const QRegularExpression headingRe(QStringLiteral("^#{1,6}\\s+.*"));
+        static const QRegularExpression boldRe(QStringLiteral("(\\*\\*[^*]+\\*\\*|__[^_]+__)"));
+        static const QRegularExpression codeRe(QStringLiteral("`[^`]+`"));
+        if (headingRe.match(text).hasMatch())
+            setFormat(0, text.size(), m_heading);
+        for (auto it = boldRe.globalMatch(text); it.hasNext(); ) {
+            const auto mm = it.next();
+            setFormat(mm.capturedStart(), mm.capturedLength(), m_bold);
+        }
+        for (auto it = codeRe.globalMatch(text); it.hasNext(); ) {
+            const auto mm = it.next();
+            setFormat(mm.capturedStart(), mm.capturedLength(), m_code);
+        }
+    }
+
+private:
+    QTextCharFormat m_heading;
+    QTextCharFormat m_bold;
+    QTextCharFormat m_code;
+};
+
+static bool listenModeEnabled()
+{
+    const QStringList args = QCoreApplication::arguments();
+    if (args.contains(QStringLiteral("--listen"))
+        || args.contains(QStringLiteral("--restore-no"))
+        || args.contains(QStringLiteral("--restore-yes"))
+        || args.contains(QStringLiteral("--save-as"))
+        || args.contains(QStringLiteral("--print-info"))
+        || args.contains(QStringLiteral("--print-to-file"))
+        || args.contains(QStringLiteral("--print-lp")))
+        return true;
+    const QString env = QString::fromLocal8Bit(qgetenv("MONASTERY_RESTORE")).toLower();
+    if (env == QLatin1String("no") || env == QLatin1String("yes")
+        || env == QLatin1String("discard") || env == QLatin1String("restore"))
+        return true;
+    return qEnvironmentVariableIntValue("MONASTERY_LISTEN") != 0;
+}
+
+static void listenLog(const char *key, const QString &value)
+{
+    std::fprintf(stdout, "%s: %s\n", key, qPrintable(value));
+    std::fflush(stdout);
+}
+
+static QString argValueAfter(const QString &flag)
+{
+    const QStringList args = QCoreApplication::arguments();
+    const int i = args.indexOf(flag);
+    if (i >= 0 && i + 1 < args.size() && !args.at(i + 1).startsWith(QLatin1Char('-')))
+        return args.at(i + 1);
+    return QString();
+}
+
+static QString listenPrintToFilePath()
+{
+    return argValueAfter(QStringLiteral("--print-to-file"));
+}
+
+static bool listenPrintLpRequested()
+{
+    return QCoreApplication::arguments().contains(QStringLiteral("--print-lp"));
+}
+
+static bool listenPrintLpExecute()
+{
+    return qEnvironmentVariableIntValue("MONASTERY_PRINT_LP") != 0
+        || qEnvironmentVariableIntValue("SHOIN_PRINT_LP") != 0;
+}
+
+static QPageLayout defaultPrintPageLayout()
+{
+    return QPageLayout(QPageSize(QPageSize::Letter),
+                       QPageLayout::Portrait,
+                       QMarginsF(0.75, 0.75, 0.75, 0.75),
+                       QPageLayout::Inch);
+}
+
+static QPageLayout pageLayoutFromPrinter(const QPrinter &printer)
+{
+    const QPageLayout layout = printer.pageLayout();
+    return layout.isValid() ? layout : defaultPrintPageLayout();
+}
+
+static QStringList cupsLpArgv(const QString &printerName, int copies, const QString &pdfPath)
+{
+    QStringList args;
+    if (!printerName.isEmpty())
+        args << QStringLiteral("-d") << printerName;
+    if (copies > 1)
+        args << QStringLiteral("-n") << QString::number(copies);
+    args << pdfPath;
+    return args;
+}
+
+static QString formatCommandLine(const QString &program, const QStringList &args)
+{
+    QStringList parts;
+    parts << program;
+    parts += args;
+    return parts.join(QLatin1Char(' '));
+}
+
+static void listenLogPrinters()
+{
+    const QList<QPrinterInfo> printers = QPrinterInfo::availablePrinters();
+    const QString def = QPrinterInfo::defaultPrinterName();
+    bool brother = false;
+    for (const QPrinterInfo &info : printers) {
+        if (info.printerName().contains(QStringLiteral("Brother"), Qt::CaseInsensitive)) {
+            brother = true;
+            break;
+        }
+    }
+    listenLog("printers", QString::number(printers.size()));
+    listenLog("default_printer", def.isEmpty() ? QStringLiteral("(none)") : def);
+    listenLog("has_brother", brother ? QStringLiteral("yes") : QStringLiteral("no"));
+    listenLog("print_dialog", printers.isEmpty() ? QStringLiteral("qt") : QStringLiteral("cups"));
+}
+
+
+static void showFamilyInCombo(QFontComboBox *combo, const QString &family)
+{
+    if (!combo || family.isEmpty())
+        return;
+    QSignalBlocker block(combo);
+    combo->setCurrentFont(QFont(family));
+    if (QString::compare(combo->currentText(), family, Qt::CaseInsensitive) == 0)
+        return;
+    if (!combo->isEditable())
+        combo->setEditable(true);
+    combo->setEditText(family);
+    if (QString::compare(combo->currentText(), family, Qt::CaseInsensitive) != 0)
+        combo->setCurrentText(family);
+}
+
+static void showSizeInCombo(QComboBox *combo, int pt)
+{
+    if (!combo || pt <= 0)
+        return;
+    QSignalBlocker block(combo);
+    const QString s = QString::number(pt);
+    if (combo->findText(s) < 0) {
+        int i = 0;
+        for (; i < combo->count(); ++i) {
+            if (combo->itemText(i).toInt() > pt)
+                break;
+        }
+        combo->insertItem(i, s);
+    }
+    combo->setCurrentText(s);
+}
+
+
+static bool isDocxPath(const QString &path)
+{
+    return QFileInfo(path).suffix().toLower() == QLatin1String("docx");
+}
+
+static QString listenSaveAsPath()
+{
+    const QStringList args = QCoreApplication::arguments();
+    const int i = args.indexOf(QStringLiteral("--save-as"));
+    if (i >= 0 && i + 1 < args.size() && !args.at(i + 1).startsWith(QLatin1Char('-')))
+        return args.at(i + 1);
+    const QString env = QString::fromLocal8Bit(qgetenv("MONASTERY_SAVE_AS"));
+    if (!env.isEmpty())
+        return env;
+    return QString::fromLocal8Bit(qgetenv("LISTEN_SAVE_AS"));
+}
+
+static void listenLogDocxPeek(const QString &path)
+{
+    bool hasCt = false;
+    bool hasDoc = false;
+    bool leftover = false;
+    QString err;
+    DocumentIo::docxPeek(path, &hasCt, &hasDoc, &leftover, &err);
+    listenLog("has_content_types", hasCt ? QStringLiteral("yes") : QStringLiteral("no"));
+    listenLog("has_document_xml", hasDoc ? QStringLiteral("yes") : QStringLiteral("no"));
+    listenLog("leftover_html", leftover ? QStringLiteral("yes") : QStringLiteral("no"));
+}
+
+// Proof-only: MONASTERY_RESTORE=no or --restore-no. Not the GUI default.
+static int scriptedRestoreChoice()
+{
+    const QString env = QString::fromLocal8Bit(qgetenv("MONASTERY_RESTORE")).toLower();
+    if (env == QLatin1String("no") || env == QLatin1String("discard"))
+        return 0;
+    if (env == QLatin1String("yes") || env == QLatin1String("restore"))
+        return 1;
+    const QStringList args = QCoreApplication::arguments();
+    if (args.contains(QStringLiteral("--restore-no")))
+        return 0;
+    if (args.contains(QStringLiteral("--restore-yes")))
+        return 1;
+    return -1;
+}
+
+static bool isSourceDocumentPath(const QString &path)
+{
+    const QString ext = QFileInfo(path).suffix().toLower();
+    return ext == QLatin1String("md")
+        || ext == QLatin1String("markdown")
+        || ext == QLatin1String("txt");
+}
+
 MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent), m_currentTheme(themeForId(ThemeId::Leather)) {
     setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
     setMouseTracking(true);  // Enable mouse tracking for cursor changes
@@ -305,7 +559,11 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent), m_currentThem
     m_closeBtn = new QPushButton("×");
     m_closeBtn->setFixedSize(30,30);
     m_closeBtn->setStyleSheet("border: none; background: transparent; color: white;");
-    connect(m_closeBtn, &QPushButton::clicked, this, &QWidget::close);
+    connect(m_closeBtn, &QPushButton::clicked, this, [this]() {
+        if (m_restoreDialogUp)
+            return;
+        close();
+    });
 
     m_titleLabel = new QLabel("Monastery — Untitled");
     QFont titleFont("Noto Serif", 10, QFont::Bold);
@@ -354,6 +612,7 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent), m_currentThem
     editMenu->addAction(m_findAction);
     editMenu->addSeparator();
     editMenu->addAction(m_pageBreakAction);
+    editMenu->addAction(m_checklistAction);
     editMenu->addSeparator();
     editMenu->addAction(m_narrowMarginsAction);
     QMenu *viewMenu = m_menuBar->addMenu("&View");
@@ -407,19 +666,21 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent), m_currentThem
     m_justifyAction->setIcon(QIcon(":/icons/justify.png"));
     m_bulletAction->setIcon(QIcon(":/icons/bullet.png"));
     m_numberAction->setIcon(QIcon(":/icons/numbered.png"));
+    m_checklistAction->setIcon(QIcon(":/icons/checklist.png"));
     m_toolBar->addAction(m_newAction);
     m_toolBar->addAction(m_openAction);
     m_toolBar->addAction(m_saveAction);
     m_toolBar->addSeparator();
-    QFontComboBox *fontCombo = new QFontComboBox();
-    fontCombo->setCurrentFont(QFont("Noto Serif"));
-    connect(fontCombo, QOverload<const QString &>::of(&QFontComboBox::currentTextChanged), this, &MonasteryFrame::onFontChanged);
-    m_toolBar->addWidget(fontCombo);
-    QComboBox *sizeCombo = new QComboBox();
-    sizeCombo->addItems({"8", "10", "12", "14", "16", "18", "20", "24", "28", "32"});
-    sizeCombo->setCurrentText("12");
-    connect(sizeCombo, QOverload<const QString &>::of(&QComboBox::currentTextChanged), this, &MonasteryFrame::onSizeChanged);
-    m_toolBar->addWidget(sizeCombo);
+    m_fontCombo = new QFontComboBox();
+    m_fontCombo->setEditable(true);
+    m_fontCombo->setCurrentFont(QFont("Noto Serif"));
+    connect(m_fontCombo, &QComboBox::textActivated, this, &MonasteryFrame::onFontChanged);
+    m_toolBar->addWidget(m_fontCombo);
+    m_sizeCombo = new QComboBox();
+    m_sizeCombo->addItems({"8", "10", "12", "14", "16", "18", "20", "24", "28", "32"});
+    m_sizeCombo->setCurrentText("12");
+    connect(m_sizeCombo, &QComboBox::textActivated, this, &MonasteryFrame::onSizeChanged);
+    m_toolBar->addWidget(m_sizeCombo);
     m_toolBar->addSeparator();
     m_toolBar->addAction(m_boldAction);
     m_toolBar->addAction(m_italicAction);
@@ -432,14 +693,41 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent), m_currentThem
     m_toolBar->addSeparator();
     m_toolBar->addAction(m_bulletAction);
     m_toolBar->addAction(m_numberAction);
+    m_toolBar->addAction(m_checklistAction);
     mainLayout->addWidget(m_toolBar);
 
-    // editor
-    m_editor = new MonasteryEditor(this);
-    mainLayout->addWidget(m_editor, 1);
+    // editor: HTML parchment + markdown source (QStackedWidget; WebEngine stays)
+    m_editorStack = new QStackedWidget(this);
+    m_editor = new MonasteryEditor(m_editorStack);
+    m_mdEdit = new QPlainTextEdit(m_editorStack);
+    {
+        QFont mono;
+        mono.setFamilies({QStringLiteral("DejaVu Sans Mono"), QStringLiteral("Liberation Mono"),
+                          QStringLiteral("Courier New"), QStringLiteral("monospace")});
+        mono.setPointSize(12);
+        m_mdEdit->setFont(mono);
+    }
+    m_mdEdit->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+    m_mdEdit->setTabStopDistance(32);
+    m_mdEdit->setStyleSheet(QStringLiteral(
+        "QPlainTextEdit { background-color: #1e1a17; color: #F5E8C7; border: none;"
+        " selection-background-color: #5C4A3F; }"));
+    new MarkdownHighlighter(m_mdEdit->document());
+    connect(m_mdEdit, &QPlainTextEdit::modificationChanged, this, [this](bool) {
+        updateTitleBar();
+    });
+    connect(m_mdEdit, &QPlainTextEdit::textChanged, this, [this]() {
+        if (isMarkdownMode())
+            updateWordCount();
+    });
+    m_editorStack->addWidget(m_editor);
+    m_editorStack->addWidget(m_mdEdit);
+    m_editorStack->setCurrentWidget(m_editor);
+    mainLayout->addWidget(m_editorStack, 1);
     connect(m_editor, &MonasteryEditor::wordCountChanged, this, [this](int count) {
         m_wordCountLabel->setText(QString("Words: %1").arg(count));
     });
+    connect(m_editor, &MonasteryEditor::selectionFontChanged, this, &MonasteryFrame::onSelectionFontChanged);
     connect(m_editor, &MonasteryEditor::dirtyChanged, this, [this](bool) {
         updateTitleBar();
     });
@@ -450,13 +738,7 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent), m_currentThem
         }
     });
     connect(m_editor->webView()->page(), &QWebEnginePage::pdfPrintingFinished,
-            this, [this](const QString &path, bool success) {
-        if (!success)
-            QMessageBox::warning(this, "PDF Export Failed",
-                                 "Could not write the PDF:\n" + path);
-        else
-            m_statusBar->showMessage("Exported PDF: " + path);
-    });
+            this, &MonasteryFrame::onPdfPrintingFinished);
 
     // statusBar - dark leather + permanent word count
     m_statusBar = new QStatusBar;
@@ -496,11 +778,26 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent), m_currentThem
     m_autoSaveTimer->start(30000);  // 30 seconds
 
     // Route everything through the web editor
-    connect(m_undoAction, &QAction::triggered, this, [this]() { m_editor->execCommand("undo"); });
-    connect(m_redoAction, &QAction::triggered, this, [this]() { m_editor->execCommand("redo"); });
-    connect(m_cutAction,   &QAction::triggered, this, [this]() { m_editor->execCommand("cut"); });
-    connect(m_copyAction,  &QAction::triggered, this, [this]() { m_editor->execCommand("copy"); });
-    connect(m_pasteAction, &QAction::triggered, this, [this]() { m_editor->execCommand("paste"); });
+    connect(m_undoAction, &QAction::triggered, this, [this]() {
+        if (isMarkdownMode()) { m_mdEdit->undo(); return; }
+        m_editor->execCommand("undo");
+    });
+    connect(m_redoAction, &QAction::triggered, this, [this]() {
+        if (isMarkdownMode()) { m_mdEdit->redo(); return; }
+        m_editor->execCommand("redo");
+    });
+    connect(m_cutAction, &QAction::triggered, this, [this]() {
+        if (isMarkdownMode()) { m_mdEdit->cut(); return; }
+        m_editor->execCommand("cut");
+    });
+    connect(m_copyAction, &QAction::triggered, this, [this]() {
+        if (isMarkdownMode()) { m_mdEdit->copy(); return; }
+        m_editor->execCommand("copy");
+    });
+    connect(m_pasteAction, &QAction::triggered, this, [this]() {
+        if (isMarkdownMode()) { m_mdEdit->paste(); return; }
+        m_editor->execCommand("paste");
+    });
 
     // Label refresh is callback-only; the editor polls JS without QEventLoop.
     m_wordCountPollTimer = new QTimer(this);
@@ -620,6 +917,10 @@ void MonasteryFrame::createActions() {
     m_numberAction->setToolTip("Numbered List");
     connect(m_numberAction, &QAction::triggered, this, &MonasteryFrame::onNumberedList);
 
+    m_checklistAction = new QAction(this);
+    m_checklistAction->setToolTip("Checklist");
+    connect(m_checklistAction, &QAction::triggered, this, &MonasteryFrame::onChecklist);
+
     m_undoAction = new QAction("Undo", this);
     m_undoAction->setShortcut(QKeySequence::Undo);
 
@@ -672,9 +973,15 @@ void MonasteryFrame::createStatusBar() {
 void MonasteryFrame::onNew() {
     if (!confirmProceedIfDirty())
         return;
+    setMarkdownMode(false);
     m_editor->setHtml("<p></p>");
     m_currentFilePath.clear();
     m_editor->markClean();
+    if (m_mdEdit) {
+        QSignalBlocker block(m_mdEdit);
+        m_mdEdit->clear();
+        m_mdEdit->document()->setModified(false);
+    }
     updateTitleBar();
     m_statusBar->showMessage("New document created");
     updateWordCount();
@@ -684,22 +991,9 @@ void MonasteryFrame::onOpen() {
     if (!confirmProceedIfDirty())
         return;
 
-    QString fileName = QFileDialog::getOpenFileName(this, "Open HTML", m_docsDir, "HTML files (*.html)", nullptr, QFileDialog::DontUseNativeDialog);
+    QString fileName = QFileDialog::getOpenFileName(this, "Open", m_docsDir, kDocumentFilter, nullptr, QFileDialog::DontUseNativeDialog);
     if (fileName.isEmpty()) return;
-
-    QFile file(fileName);
-    if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        QString html = QString::fromUtf8(file.readAll());
-        m_editor->setHtml(html);
-        m_currentFilePath = fileName;
-        m_editor->markClean();
-        updateTitleBar();
-        m_statusBar->showMessage("File opened: " + fileName);
-        updateWordCount();
-    } else {
-        QMessageBox::warning(this, "Open Failed",
-                             "Could not read:\n" + fileName + "\n" + file.errorString());
-    }
+    openPath(fileName);
 }
 
 void MonasteryFrame::onSave() {
@@ -707,10 +1001,26 @@ void MonasteryFrame::onSave() {
 }
 
 void MonasteryFrame::onExit() {
+    if (m_restoreDialogUp)
+        return;
     close();
 }
 
 void MonasteryFrame::onAutoSave() {
+    if (isMarkdownMode()) {
+        if (!m_mdEdit || !m_mdEdit->document()->isModified())
+            return;
+        const QString dest = hasNamedDocument()
+            ? (QFileInfo(m_currentFilePath).absolutePath() + "/"
+               + QFileInfo(m_currentFilePath).completeBaseName() + "_autosave.md")
+            : (m_docsDir + "/Monastery_AutoSave.md");
+        QFile f(dest);
+        if (f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+            f.write(m_mdEdit->toPlainText().toUtf8());
+            m_statusBar->showMessage("Auto-saved to " + dest);
+        }
+        return;
+    }
     m_editor->fetchHtml([this](const QString &html) {
         if (wouldClobberManuscript(html)) {
             m_statusBar->showMessage("Autosave skipped — empty or incomplete editor content");
@@ -725,41 +1035,291 @@ void MonasteryFrame::onAutoSave() {
 }
 
 void MonasteryFrame::onPrint() {
-    QString fileName = QFileDialog::getSaveFileName(this, "Export PDF", m_docsDir, "PDF files (*.pdf)", nullptr, QFileDialog::DontUseNativeDialog);
-    if (fileName.isEmpty()) return;
-    if (!fileName.endsWith(".pdf")) fileName += ".pdf";
+    QPrinter printer(QPrinter::HighResolution);
+    const QString defName = QPrinterInfo::defaultPrinterName();
+    if (!defName.isEmpty())
+        printer.setPrinterName(defName);
+    printer.setPageLayout(defaultPrintPageLayout());
 
-    QPageLayout layout(QPageSize(QPageSize::Letter),
-                       QPageLayout::Portrait,
-                       QMarginsF(0.75, 0.75, 0.75, 0.75),
-                       QPageLayout::Inch);
-    m_editor->webView()->page()->printToPdf(fileName, layout);
-    m_statusBar->showMessage("Exporting to PDF: " + fileName);
+    QPrintDialog dialog(&printer, this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    if (isMarkdownMode()) {
+        if (m_mdEdit)
+            m_mdEdit->print(&printer);
+        m_statusBar->showMessage("Printed");
+        return;
+    }
+
+    const QPageLayout layout = pageLayoutFromPrinter(printer);
+    const bool toFile = printer.outputFormat() == QPrinter::PdfFormat
+                        || !printer.outputFileName().isEmpty();
+    if (toFile) {
+        QString fileName = printer.outputFileName();
+        if (fileName.isEmpty())
+            return;
+        if (!fileName.endsWith(QLatin1String(".pdf"), Qt::CaseInsensitive))
+            fileName += QStringLiteral(".pdf");
+        m_editor->webView()->page()->printToPdf(fileName, layout);
+        m_statusBar->showMessage("Printing to file: " + fileName);
+        return;
+    }
+
+    if (m_printTemp) {
+        m_printTemp->deleteLater();
+        m_printTemp = nullptr;
+    }
+    auto *tmp = new QTemporaryFile(QDir::tempPath() + QStringLiteral("/monastery-print-XXXXXX.pdf"), this);
+    tmp->setAutoRemove(true);
+    if (!tmp->open()) {
+        delete tmp;
+        QMessageBox::warning(this, "Print Failed", "Could not create a temporary PDF.");
+        return;
+    }
+    const QString tmpPath = tmp->fileName();
+    tmp->close();
+    m_printTemp = tmp;
+    m_pendingLpPdf = tmpPath;
+    m_pendingLpPrinter = printer.printerName();
+    m_pendingLpCopies = qMax(1, printer.copyCount());
+    m_editor->webView()->page()->printToPdf(tmpPath, layout);
+    m_statusBar->showMessage("Printing...");
 }
 
+void MonasteryFrame::onPdfPrintingFinished(const QString &path, bool success)
+{
+    if (listenModeEnabled())
+        listenLog("pdf_print", success ? QStringLiteral("success") : QStringLiteral("fail"));
+
+    const bool cupsJob = !m_pendingLpPdf.isEmpty() && path == m_pendingLpPdf;
+    if (cupsJob) {
+        const QString pdf = m_pendingLpPdf;
+        const QString printerName = m_pendingLpPrinter;
+        const int copies = m_pendingLpCopies;
+        m_pendingLpPdf.clear();
+        m_pendingLpPrinter.clear();
+        m_pendingLpCopies = 1;
+
+        auto cleanupTemp = [this]() {
+            if (m_printTemp) {
+                m_printTemp->deleteLater();
+                m_printTemp = nullptr;
+            }
+        };
+
+        if (!success) {
+            cleanupTemp();
+            if (!listenModeEnabled())
+                QMessageBox::warning(this, "Print Failed",
+                                     "Could not render the page for printing.");
+            if (m_listenPrintPending)
+                requestListenQuit();
+            return;
+        }
+
+        const QStringList args = cupsLpArgv(printerName, copies, pdf);
+        if (listenModeEnabled())
+            listenLog("lp_argv", formatCommandLine(QStringLiteral("lp"), args));
+
+        const bool allowLp = !listenModeEnabled() || listenPrintLpExecute();
+        if (!allowLp) {
+            listenLog("lp_dry_run", QStringLiteral("yes"));
+            cleanupTemp();
+            if (m_listenPrintPending)
+                requestListenQuit();
+            return;
+        }
+
+        QProcess *lp = new QProcess(this);
+        connect(lp, &QProcess::finished, this,
+                [this, lp](int code, QProcess::ExitStatus st) {
+            const QByteArray err = lp->readAllStandardError();
+            lp->deleteLater();
+            if (m_printTemp) {
+                m_printTemp->deleteLater();
+                m_printTemp = nullptr;
+            }
+            if (code != 0 || st != QProcess::NormalExit) {
+                if (!listenModeEnabled()) {
+                    const QString msg = err.isEmpty()
+                        ? QStringLiteral("lp failed")
+                        : QString::fromLocal8Bit(err);
+                    QMessageBox::warning(this, "Print Failed", msg);
+                } else {
+                    listenLog("lp_error", err.isEmpty() ? QStringLiteral("lp failed")
+                                                        : QString::fromLocal8Bit(err));
+                }
+            } else {
+                m_statusBar->showMessage("Sent to printer");
+                if (listenModeEnabled())
+                    listenLog("lp_sent", QStringLiteral("yes"));
+            }
+            if (m_listenPrintPending)
+                requestListenQuit();
+        });
+        lp->start(QStringLiteral("lp"), args);
+        if (!lp->waitForStarted(3000)) {
+            if (!listenModeEnabled())
+                QMessageBox::warning(this, "Print Failed", "Could not start lp.");
+            else
+                listenLog("lp_error", QStringLiteral("could not start lp"));
+            lp->deleteLater();
+            if (m_printTemp) {
+                m_printTemp->deleteLater();
+                m_printTemp = nullptr;
+            }
+            if (m_listenPrintPending)
+                requestListenQuit();
+        }
+        return;
+    }
+
+    if (!success) {
+        if (!listenModeEnabled())
+            QMessageBox::warning(this, "Print Failed",
+                                 "Could not write the print file:\n" + path);
+    } else {
+        m_statusBar->showMessage("Printed to: " + path);
+    }
+
+    if (m_listenPrintPending)
+        requestListenQuit();
+}
+
+bool MonasteryFrame::maybeStartListenPrint()
+{
+    if (listenPrintLpRequested()) {
+        const QString def = QPrinterInfo::defaultPrinterName();
+        const QStringList args = cupsLpArgv(def, 1, QStringLiteral("/tmp/monastery-print.pdf"));
+        listenLog("lp_argv", formatCommandLine(QStringLiteral("lp"), args));
+        listenLog("lp_dry_run", QStringLiteral("yes"));
+    }
+
+    const QString dest = listenPrintToFilePath();
+    if (dest.isEmpty())
+        return false;
+
+    if (isMarkdownMode()) {
+        if (!m_mdEdit)
+            return false;
+        QPrinter printer(QPrinter::HighResolution);
+        printer.setOutputFormat(QPrinter::PdfFormat);
+        printer.setOutputFileName(dest);
+        printer.setPageLayout(defaultPrintPageLayout());
+        m_mdEdit->print(&printer);
+        const bool ok = QFileInfo(dest).exists() && QFileInfo(dest).size() > 0;
+        listenLog("pdf_print", ok ? QStringLiteral("success") : QStringLiteral("fail"));
+        return false;
+    }
+    if (!m_editor || !m_editor->webView() || !m_editor->webView()->page())
+        return false;
+    m_listenPrintPending = true;
+    m_editor->webView()->page()->printToPdf(dest, defaultPrintPageLayout());
+    m_statusBar->showMessage("Printing to file: " + dest);
+    return true;
+}
+
+
 void MonasteryFrame::onInsertPageBreak() {
+    if (isMarkdownMode())
+        return;
     m_editor->execCommand("insertHTML",
         "<div class=\"page-break\" style=\"page-break-after: always; border: none; border-top: 1px dashed #8B7355; margin: 30px 0;\"></div>");
 }
 
-void MonasteryFrame::onBold() { m_editor->execCommand("bold"); }
+void MonasteryFrame::onBold() { if (!isMarkdownMode()) m_editor->execCommand("bold"); }
 
-void MonasteryFrame::onItalic()        { m_editor->execCommand("italic"); }
-void MonasteryFrame::onUnderline()     { m_editor->execCommand("underline"); }
+void MonasteryFrame::onItalic()        { if (!isMarkdownMode()) m_editor->execCommand("italic"); }
+void MonasteryFrame::onUnderline()     { if (!isMarkdownMode()) m_editor->execCommand("underline"); }
 
-void MonasteryFrame::onAlignLeft()   { m_editor->execCommand("justifyLeft"); }
-void MonasteryFrame::onAlignCenter() { m_editor->execCommand("justifyCenter"); }
-void MonasteryFrame::onAlignRight()  { m_editor->execCommand("justifyRight"); }
-void MonasteryFrame::onJustify()     { m_editor->execCommand("justifyFull"); }
+void MonasteryFrame::onAlignLeft()   { if (!isMarkdownMode()) m_editor->execCommand("justifyLeft"); }
+void MonasteryFrame::onAlignCenter() { if (!isMarkdownMode()) m_editor->execCommand("justifyCenter"); }
+void MonasteryFrame::onAlignRight()  { if (!isMarkdownMode()) m_editor->execCommand("justifyRight"); }
+void MonasteryFrame::onJustify()     { if (!isMarkdownMode()) m_editor->execCommand("justifyFull"); }
 
-void MonasteryFrame::onBulletList()    { m_editor->execCommand("insertUnorderedList"); }
-void MonasteryFrame::onNumberedList()  { m_editor->execCommand("insertOrderedList"); }
+void MonasteryFrame::onBulletList()    { if (!isMarkdownMode()) m_editor->execCommand("insertUnorderedList"); }
+void MonasteryFrame::onNumberedList()  { if (!isMarkdownMode()) m_editor->execCommand("insertOrderedList"); }
+void MonasteryFrame::onChecklist() { if (!isMarkdownMode()) m_editor->insertChecklist(); }
 
 void MonasteryFrame::onFontChanged(const QString &font) {
-    m_editor->execCommand("fontName", font);
+    if (isMarkdownMode())
+        return;
+    m_editor->applyFontFamily(font);
 }
 
+
+void MonasteryFrame::onSelectionFontChanged(const QString &family, int pt)
+{
+    if (isMarkdownMode())
+        return;
+    if ((m_fontCombo && m_fontCombo->hasFocus()) || (m_sizeCombo && m_sizeCombo->hasFocus()))
+        return;
+    showFamilyInCombo(m_fontCombo, family);
+    showSizeInCombo(m_sizeCombo, pt);
+}
+
+void MonasteryFrame::dumpListenSelectionFont()
+{
+    if (!listenModeEnabled() || !m_editor || isMarkdownMode())
+        return;
+
+    auto family = std::make_shared<QString>();
+    auto pt = std::make_shared<int>(0);
+    auto caretFam = std::make_shared<QString>();
+    auto caretPt = std::make_shared<int>(0);
+    auto found = std::make_shared<bool>(false);
+    auto done = std::make_shared<bool>(false);
+
+    QElapsedTimer clock;
+    clock.start();
+    while (clock.elapsed() < 4000) {
+        *done = false;
+        m_editor->requestHeadingFont([=](const QString &f, int p, const QString &cf, int cp, bool hit) {
+            *family = f;
+            *pt = p;
+            *caretFam = cf;
+            *caretPt = cp;
+            *found = hit;
+            *done = true;
+        });
+        QElapsedTimer wait;
+        wait.start();
+        while (!*done && wait.elapsed() < 400) {
+            QEventLoop loop;
+            QTimer::singleShot(40, &loop, &QEventLoop::quit);
+            loop.exec();
+        }
+        if (*found && (!family->isEmpty() || !caretFam->isEmpty()))
+            break;
+        QEventLoop pause;
+        QTimer::singleShot(80, &pause, &QEventLoop::quit);
+        pause.exec();
+    }
+
+    const QString heading = family->isEmpty() ? *caretFam : *family;
+    const int headingPt = *pt > 0 ? *pt : *caretPt;
+    const QString caret = caretFam->isEmpty() ? *family : *caretFam;
+    const int cpt = *caretPt > 0 ? *caretPt : *pt;
+    if (!heading.isEmpty())
+        listenLog("heading_font", heading);
+    if (headingPt > 0)
+        listenLog("heading_size", QString::number(headingPt));
+    if (!caret.isEmpty())
+        listenLog("caret_font", caret);
+    if (cpt > 0)
+        listenLog("caret_size", QString::number(cpt));
+    onSelectionFontChanged(caret.isEmpty() ? heading : caret, cpt > 0 ? cpt : headingPt);
+    if (m_fontCombo)
+        listenLog("toolbar_font", m_fontCombo->currentText());
+    if (m_sizeCombo)
+        listenLog("toolbar_size", m_sizeCombo->currentText());
+}
+
+
 void MonasteryFrame::onSizeChanged(const QString &size) {
+    if (isMarkdownMode())
+        return;
     bool ok = false;
     const int pt = size.toInt(&ok);
     if (!ok || pt <= 0)
@@ -768,12 +1328,26 @@ void MonasteryFrame::onSizeChanged(const QString &size) {
 }
 
 void MonasteryFrame::updateWordCount() {
+    if (isMarkdownMode()) {
+        if (!m_wordCountLabel || !m_mdEdit)
+            return;
+        const QString t = m_mdEdit->toPlainText().trimmed();
+        int count = 0;
+        if (!t.isEmpty())
+            count = t.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts).size();
+        m_wordCountLabel->setText(QString("Words: %1").arg(count));
+        return;
+    }
     m_editor->requestWordCount([this](int count) {
         m_wordCountLabel->setText(QString("Words: %1").arg(count));
     });
 }
 
 void MonasteryFrame::closeEvent(QCloseEvent *event) {
+    if (m_restoreDialogUp) {
+        event->ignore();
+        return;
+    }
     if (!confirmProceedIfDirty()) {
         event->ignore();
         return;
@@ -962,9 +1536,9 @@ bool MonasteryFrame::eventFilter(QObject *obj, QEvent *event) {
 }
 
 void MonasteryFrame::onSaveAs() {
-    QString fileName = QFileDialog::getSaveFileName(this, "Save HTML", m_docsDir, "HTML files (*.html)", nullptr, QFileDialog::DontUseNativeDialog);
+    QString fileName = QFileDialog::getSaveFileName(this, "Save As", m_docsDir, kDocumentFilter, nullptr, QFileDialog::DontUseNativeDialog);
     if (fileName.isEmpty()) return;
-    if (!fileName.endsWith(".html")) fileName += ".html";
+    fileName = ensureDocumentSuffix(fileName);
     m_currentFilePath = fileName;
     if (saveNow())
         updateTitleBar();
@@ -1012,7 +1586,7 @@ QString MonasteryFrame::autosaveSidecarPath() const {
 }
 
 void MonasteryFrame::updateTitleBar() {
-    const bool dirty = m_editor && m_editor->isDirty();
+    const bool dirty = documentIsDirty();
     QString title = QStringLiteral("Monastery — ") + documentDisplayName();
     if (dirty)
         title += QStringLiteral(" *");
@@ -1039,31 +1613,29 @@ bool MonasteryFrame::wouldClobberManuscript(const QString &incoming) const {
 }
 
 bool MonasteryFrame::writeHtmlFile(const QString &path, const QString &html) {
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        QMessageBox::warning(this, "Save Failed",
-                             "Could not write:\n" + path + "\n" + file.errorString());
-        return false;
-    }
-    QTextStream out(&file);
-    out.setEncoding(QStringConverter::Utf8);
-    out << html;
-    out.flush();
-    file.close();
-    if (file.error() != QFile::NoError) {
-        QMessageBox::warning(this, "Save Failed",
-                             "Could not finish writing:\n" + path + "\n" + file.errorString());
+    QString err;
+    if (!DocumentIo::writeFromHtml(path, html, &err)) {
+        if (listenModeEnabled())
+            listenLog("save_error", err.isEmpty() ? QStringLiteral("write failed") : err);
+        else
+            QMessageBox::warning(this, "Save Failed",
+                                 "Could not write:\n" + path + "\n" + err);
         return false;
     }
     return true;
 }
 
 bool MonasteryFrame::persistDocument(const QString &path, const QString &html, bool markCleanAfter) {
-    if (wouldClobberManuscript(html)) {
+    QString body = html;
+    if (htmlLooksEmpty(body) && m_editor && !isMarkdownMode() && !htmlLooksEmpty(m_editor->lastGoodHtml()))
+        body = m_editor->lastGoodHtml();
+    if (wouldClobberManuscript(body)) {
+        if (listenModeEnabled())
+            listenLog("save_error", QStringLiteral("wouldClobber empty or incomplete html"));
         m_statusBar->showMessage("Save skipped — empty or incomplete editor content. Last good copy kept.");
         return false;
     }
-    if (!writeHtmlFile(path, html))
+    if (!writeHtmlFile(path, body))
         return false;
     m_statusBar->showMessage("Saved to " + path);
     if (markCleanAfter) {
@@ -1076,45 +1648,70 @@ bool MonasteryFrame::persistDocument(const QString &path, const QString &html, b
 bool MonasteryFrame::ensureSavePath() {
     if (hasNamedDocument())
         return true;
-    QString fileName = QFileDialog::getSaveFileName(this, "Save HTML", m_docsDir, "HTML files (*.html)", nullptr, QFileDialog::DontUseNativeDialog);
+    QString fileName = QFileDialog::getSaveFileName(this, "Save As", m_docsDir, kDocumentFilter, nullptr, QFileDialog::DontUseNativeDialog);
     if (fileName.isEmpty())
         return false;
-    if (!fileName.endsWith(".html"))
-        fileName += ".html";
+    fileName = ensureDocumentSuffix(fileName);
     m_currentFilePath = fileName;
     updateTitleBar();
     return true;
+}
+
+QString MonasteryFrame::waitForEditorHtml()
+{
+    QString captured;
+    if (!m_editor)
+        return captured;
+
+    QElapsedTimer clock;
+    clock.start();
+    while (clock.elapsed() < 8000) {
+        auto done = std::make_shared<bool>(false);
+        m_editor->fetchHtml([&](const QString &html) {
+            captured = html;
+            *done = true;
+        });
+        if (!*done) {
+            QEventLoop loop;
+            QTimer pump;
+            pump.setInterval(15);
+            QObject::connect(&pump, &QTimer::timeout, [&]() {
+                if (*done)
+                    loop.quit();
+            });
+            pump.start();
+            QTimer::singleShot(400, &loop, &QEventLoop::quit);
+            loop.exec();
+        }
+        if (!htmlLooksEmpty(captured))
+            return captured;
+        QEventLoop pause;
+        QTimer::singleShot(80, &pause, &QEventLoop::quit);
+        pause.exec();
+    }
+    if (htmlLooksEmpty(captured))
+        captured = m_editor->lastGoodHtml();
+    return captured;
 }
 
 bool MonasteryFrame::saveNow() {
     if (!ensureSavePath())
         return false;
 
-    auto done = std::make_shared<bool>(false);
-    auto ok = std::make_shared<bool>(false);
-    m_editor->fetchHtml([this, done, ok](const QString &html) {
-        *ok = persistDocument(m_currentFilePath, html, true);
-        *done = true;
-    });
-    if (!*done) {
-        QEventLoop loop;
-        QTimer pump;
-        pump.setInterval(15);
-        QObject::connect(&pump, &QTimer::timeout, [&]() {
-            if (*done)
-                loop.quit();
-        });
-        pump.start();
-        QTimer::singleShot(2000, &loop, &QEventLoop::quit);
-        loop.exec();
-    }
-    if (!*done)
-        *ok = persistDocument(m_currentFilePath, m_editor->lastGoodHtml(), true);
-    return *ok;
+    const bool destSource = isSourceDocumentPath(m_currentFilePath);
+    if (isMarkdownMode() && destSource)
+        return saveMarkdownNow();
+
+    QString html;
+    if (isMarkdownMode())
+        html = DocumentIo::markdownToHtml(m_mdEdit ? m_mdEdit->toPlainText() : QString());
+    else
+        html = waitForEditorHtml();
+    return persistDocument(m_currentFilePath, html, true);
 }
 
 bool MonasteryFrame::confirmProceedIfDirty() {
-    const bool dirty = m_editor->isDirty() || m_editor->queryDirtyNow();
+    const bool dirty = documentIsDirty();
     if (!dirty)
         return true;
 
@@ -1136,27 +1733,75 @@ void MonasteryFrame::maybeRestoreAutosave() {
 
     const QString path = m_docsDir + "/Monastery_AutoSave.html";
     QFile file(path);
-    if (!file.exists())
-        return;
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
-        return;
-    const QString html = QString::fromUtf8(file.readAll());
-    if (htmlLooksEmpty(html))
-        return;
+    QString html;
+    const bool readable = file.exists() && file.open(QIODevice::ReadOnly | QIODevice::Text);
+    if (readable)
+        html = QString::fromUtf8(file.readAll());
+    file.close();
 
-    const auto reply = QMessageBox::question(
-        this, "Restore Autosave",
-        "An autosaved document was found. Restore it?",
-        QMessageBox::Yes | QMessageBox::No);
-    if (reply != QMessageBox::Yes)
-        return;
+    auto finishListen = [this](const QString &opened, const QString &recovery) {
+        if (listenModeEnabled()) {
+            emitListenHealth(opened, recovery);
+            if (!maybeStartListenPrint())
+                requestListenQuit();
+        }
+    };
 
-    m_editor->setHtml(html);
-    m_currentFilePath.clear();
-    m_editor->markDirty();
-    updateTitleBar();
-    m_statusBar->showMessage("Restored autosave");
-    updateWordCount();
+    if (!readable || htmlLooksEmpty(html)) {
+        QString opened;
+        if (!m_pendingOpenPath.isEmpty()) {
+            opened = m_pendingOpenPath;
+            const QString pending = m_pendingOpenPath;
+            m_pendingOpenPath.clear();
+            openPath(pending);
+            if (!m_currentFilePath.isEmpty())
+                opened = m_currentFilePath;
+        }
+        finishListen(opened, QString());
+        return;
+    }
+
+    int choice = scriptedRestoreChoice();
+    if (choice < 0) {
+        m_restoreDialogUp = true;
+        const bool prevQuit = qApp->quitOnLastWindowClosed();
+        qApp->setQuitOnLastWindowClosed(false);
+        show();
+        raise();
+        activateWindow();
+        choice = askRestoreAutosave();
+        qApp->setQuitOnLastWindowClosed(prevQuit);
+        m_restoreDialogUp = false;
+        show();
+        raise();
+        activateWindow();
+    }
+
+    if (choice == 1) {
+        setMarkdownMode(false);
+        m_editor->setHtml(html);
+        m_currentFilePath.clear();
+        m_editor->markDirty();
+        updateTitleBar();
+        m_statusBar->showMessage("Restored autosave");
+        updateWordCount();
+        m_pendingOpenPath.clear();
+        finishListen(QString(), QStringLiteral("restored"));
+        return;
+    }
+
+    QFile::remove(path);
+    m_statusBar->showMessage("Autosave discarded");
+    QString opened;
+    if (!m_pendingOpenPath.isEmpty()) {
+        opened = m_pendingOpenPath;
+        const QString pending = m_pendingOpenPath;
+        m_pendingOpenPath.clear();
+        openPath(pending);
+        if (!m_currentFilePath.isEmpty())
+            opened = m_currentFilePath;
+    }
+    finishListen(opened, QStringLiteral("discarded"));
 }
 
 void MonasteryFrame::setupFindDialog() {
@@ -1193,6 +1838,18 @@ void MonasteryFrame::runFind(bool backward) {
     const QString needle = m_findEdit->text();
     if (needle.isEmpty())
         return;
+    if (isMarkdownMode() && m_mdEdit) {
+        QTextDocument::FindFlags flags;
+        if (backward)
+            flags |= QTextDocument::FindBackward;
+        if (!m_mdEdit->find(needle, flags)) {
+            QTextCursor c = m_mdEdit->textCursor();
+            c.movePosition(backward ? QTextCursor::End : QTextCursor::Start);
+            m_mdEdit->setTextCursor(c);
+            m_mdEdit->find(needle, flags);
+        }
+        return;
+    }
     QWebEnginePage::FindFlags flags{};
     if (backward)
         flags |= QWebEnginePage::FindBackward;
@@ -1281,6 +1938,7 @@ void MonasteryFrame::colorizeToolbarIcons(const Theme &theme)
     m_justifyAction->setIcon(tinted(QStringLiteral(":/icons/justify.png")));
     m_bulletAction->setIcon(tinted(QStringLiteral(":/icons/bullet.png")));
     m_numberAction->setIcon(tinted(QStringLiteral(":/icons/numbered.png")));
+    m_checklistAction->setIcon(tinted(QStringLiteral(":/icons/checklist.png")));
 }
 
 void MonasteryFrame::applyTheme(ThemeId id)
@@ -1394,4 +2052,257 @@ void MonasteryFrame::applyTheme(ThemeId id)
 
     QSettings settings(QStringLiteral("Monastery"), QStringLiteral("Monastery"));
     settings.setValue(QStringLiteral("theme"), t.id);
+}
+
+bool MonasteryFrame::isMarkdownSourcePath(const QString &path) const
+{
+    return isSourceDocumentPath(path);
+}
+
+bool MonasteryFrame::isMarkdownMode() const
+{
+    return m_markdownMode;
+}
+
+void MonasteryFrame::setFormatActionsEnabled(bool on)
+{
+    const QList<QAction *> acts = {
+        m_boldAction, m_italicAction, m_underlineAction,
+        m_alignLeftAction, m_alignCenterAction, m_alignRightAction, m_justifyAction,
+        m_bulletAction, m_numberAction, m_checklistAction, m_pageBreakAction
+    };
+    for (QAction *a : acts) {
+        if (a)
+            a->setEnabled(on);
+    }
+    if (m_fontCombo)
+        m_fontCombo->setEnabled(on);
+    if (m_sizeCombo)
+        m_sizeCombo->setEnabled(on);
+    if (!on && m_mdEdit) {
+        const QFont f = m_mdEdit->font();
+        showFamilyInCombo(m_fontCombo, f.family());
+        showSizeInCombo(m_sizeCombo, f.pointSize());
+    }
+}
+
+void MonasteryFrame::setMarkdownMode(bool on)
+{
+    m_markdownMode = on;
+    if (m_editorStack && m_mdEdit && m_editor)
+        m_editorStack->setCurrentWidget(on ? static_cast<QWidget *>(m_mdEdit)
+                                          : static_cast<QWidget *>(m_editor));
+    setFormatActionsEnabled(!on);
+}
+
+bool MonasteryFrame::documentIsDirty() const
+{
+    if (isMarkdownMode())
+        return m_mdEdit && m_mdEdit->document()->isModified();
+    if (!m_editor)
+        return false;
+    return m_editor->isDirty() || m_editor->queryDirtyNow();
+}
+
+bool MonasteryFrame::openPath(const QString &path)
+{
+    if (path.isEmpty())
+        return false;
+    const QString abs = QFileInfo(path).absoluteFilePath();
+    if (!m_didOfferRestore) {
+        m_pendingOpenPath = abs;
+        return true;
+    }
+    if (isSourceDocumentPath(abs))
+        return loadMarkdownDocument(abs);
+    return loadHtmlDocument(abs);
+}
+
+bool MonasteryFrame::loadHtmlDocument(const QString &path)
+{
+    QString err;
+    const QString html = DocumentIo::htmlFromFile(path, &err);
+    if (!err.isEmpty()) {
+        if (listenModeEnabled())
+            listenLog("open_error", err);
+        else
+            QMessageBox::warning(this, "Open Failed",
+                                 "Could not read:\n" + path + "\n" + err);
+        return false;
+    }
+    setMarkdownMode(false);
+    m_editor->setHtml(html);
+    m_currentFilePath = path;
+    m_editor->markClean();
+    updateTitleBar();
+    m_statusBar->showMessage("File opened: " + path);
+    updateWordCount();
+    return true;
+}
+
+bool MonasteryFrame::loadMarkdownDocument(const QString &path)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QMessageBox::warning(this, "Open Failed",
+                             "Could not read:\n" + path);
+        return false;
+    }
+    const QString text = QString::fromUtf8(file.readAll());
+    file.close();
+    setMarkdownMode(true);
+    {
+        QSignalBlocker block(m_mdEdit);
+        m_mdEdit->setPlainText(text);
+    }
+    m_mdEdit->document()->setModified(false);
+    m_currentFilePath = path;
+    updateTitleBar();
+    m_statusBar->showMessage("File opened: " + path);
+    updateWordCount();
+    return true;
+}
+
+bool MonasteryFrame::saveMarkdownNow()
+{
+    if (!ensureSavePath())
+        return false;
+    if (!isSourceDocumentPath(m_currentFilePath)) {
+        const QString html = DocumentIo::markdownToHtml(m_mdEdit ? m_mdEdit->toPlainText() : QString());
+        return persistDocument(m_currentFilePath, html, true);
+    }
+    if (!m_mdEdit) {
+        m_statusBar->showMessage("No markdown buffer to save");
+        return false;
+    }
+    QFile file(m_currentFilePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        QMessageBox::warning(this, "Save Failed",
+                             "Could not write:\n" + m_currentFilePath);
+        return false;
+    }
+    const QByteArray bytes = m_mdEdit->toPlainText().toUtf8();
+    if (file.write(bytes) != bytes.size()) {
+        QMessageBox::warning(this, "Save Failed",
+                             "Short write:\n" + m_currentFilePath);
+        return false;
+    }
+    m_mdEdit->document()->setModified(false);
+    updateTitleBar();
+    m_statusBar->showMessage("Saved to " + m_currentFilePath);
+    return true;
+}
+
+int MonasteryFrame::askRestoreAutosave()
+{
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("Restore Autosave"));
+    dlg.setModal(true);
+    dlg.setWindowModality(Qt::WindowModal);
+    dlg.setAttribute(Qt::WA_QuitOnClose, false);
+    dlg.setWindowFlags(Qt::Dialog | Qt::MSWindowsFixedSizeDialogHint);
+    QVBoxLayout *lay = new QVBoxLayout(&dlg);
+    QLabel *msg = new QLabel(QStringLiteral("An autosaved document was found. Restore it?"));
+    msg->setWordWrap(true);
+    lay->addWidget(msg);
+    QDialogButtonBox *box = new QDialogButtonBox(QDialogButtonBox::Yes | QDialogButtonBox::No);
+    lay->addWidget(box);
+    QObject::connect(box, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    QObject::connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    show();
+    raise();
+    const int rc = dlg.exec();
+    show();
+    raise();
+    activateWindow();
+    return rc == QDialog::Accepted ? 1 : 0;
+}
+
+void MonasteryFrame::emitListenHealth(const QString &openedPath, const QString &recovery)
+{
+    if (!listenModeEnabled())
+        return;
+    if (!recovery.isEmpty())
+        listenLog("recovery", recovery);
+    if (!openedPath.isEmpty())
+        listenLog("opened", openedPath);
+
+    const bool docx = isDocxPath(openedPath) || isDocxPath(m_currentFilePath);
+    bool healthOk = true;
+    if (isMarkdownMode() && m_mdEdit) {
+        const QString buf = m_mdEdit->toPlainText();
+        listenLog("mode", QStringLiteral("markdown-source"));
+        listenLog("has_hash", buf.contains(QLatin1Char('#')) ? QStringLiteral("yes") : QStringLiteral("no"));
+        listenLog("has_pipe", buf.contains(QLatin1Char('|')) ? QStringLiteral("yes") : QStringLiteral("no"));
+        listenLog("html_preview", QStringLiteral("no"));
+    } else if (!openedPath.isEmpty() || docx) {
+        listenLog("mode", docx ? QStringLiteral("html-docx") : QStringLiteral("html"));
+        listenLog("html_preview", QStringLiteral("yes"));
+        if (docx) {
+            QString herr;
+            const bool ooxml = DocumentIo::docxLooksHealthy(openedPath.isEmpty() ? m_currentFilePath : openedPath, &herr);
+            listenLog("ooxml", ooxml ? QStringLiteral("yes") : QStringLiteral("no"));
+            if (!ooxml)
+                healthOk = false;
+        }
+    }
+
+    const QString dest = listenSaveAsPath();
+    if (!dest.isEmpty()) {
+        QString html;
+        if (isMarkdownMode())
+            html = DocumentIo::markdownToHtml(m_mdEdit ? m_mdEdit->toPlainText() : QString());
+        else
+            html = waitForEditorHtml();
+        {
+            const QString probe = html.isEmpty() && m_editor ? m_editor->lastGoodHtml() : html;
+            listenLog("table_count", QString::number(probe.toLower().count(QStringLiteral("<table"))));
+            const bool fontSpan = probe.contains(QLatin1String("font-family"), Qt::CaseInsensitive)
+                || probe.contains(QLatin1String("font-size"), Qt::CaseInsensitive);
+            listenLog("has_font_span", fontSpan ? QStringLiteral("yes") : QStringLiteral("no"));
+        }
+        if (htmlLooksEmpty(html)) {
+            listenLog("save_error", QStringLiteral("empty editor html"));
+            healthOk = false;
+        } else {
+            QString err;
+            if (!DocumentIo::writeFromHtml(dest, html, &err)) {
+                listenLog("save_error", err.isEmpty() ? QStringLiteral("writeFromHtml failed") : err);
+                healthOk = false;
+            } else {
+                listenLog("saved", QFileInfo(dest).absoluteFilePath());
+            }
+        }
+        if (isDocxPath(dest)) {
+            listenLogDocxPeek(dest);
+            QString herr;
+            if (!DocumentIo::docxLooksHealthy(dest, &herr))
+                healthOk = false;
+        }
+    } else {
+        const QString probe = m_editor ? m_editor->lastGoodHtml() : QString();
+        listenLog("table_count", QString::number(probe.toLower().count(QStringLiteral("<table"))));
+        const bool fontSpan = probe.contains(QLatin1String("font-family"), Qt::CaseInsensitive)
+            || probe.contains(QLatin1String("font-size"), Qt::CaseInsensitive);
+        listenLog("has_font_span", fontSpan ? QStringLiteral("yes") : QStringLiteral("no"));
+        if (docx)
+            listenLogDocxPeek(openedPath);
+    }
+
+    dumpListenSelectionFont();
+
+    listenLogPrinters();
+
+    listenLog("still_running", QStringLiteral("yes"));
+    listenLog("health", healthOk ? QStringLiteral("ok") : QStringLiteral("fail"));
+}
+
+void MonasteryFrame::requestListenQuit()
+{
+    if (!listenModeEnabled() || m_listenQuitArmed)
+        return;
+    m_listenQuitArmed = true;
+    QTimer::singleShot(800, qApp, []() {
+        QCoreApplication::quit();
+    });
 }

@@ -54,6 +54,14 @@
     background: var(--selection-bg);
     color: var(--selection-fg);
   }
+  ul.checklist { list-style: none; padding-left: 0.2em; }
+  li.task { display:flex; gap:0.4em; align-items:flex-start; }
+  li.task input[type=checkbox] { margin-top:0.35em; width:1em; height:1em; accent-color: currentColor; flex:none; }
+  li.task.done span { text-decoration: line-through; opacity: 0.65; }
+
+  #editor table { border-collapse: collapse; width: 100%; margin: 0.6em 0 0.8em; }
+  #editor th, #editor td { border: 1px solid #ddd; padding: 0.3em 0.5em; vertical-align: top; }
+  #editor th { background: #f0f0f0; font-weight: bold; text-align: left; }
   @media print {
     html, body, .page, #editor {
       background: #ffffff !important;
@@ -83,6 +91,9 @@
       -webkit-print-color-adjust: economy;
       print-color-adjust: economy;
     }
+    li.task input[type=checkbox] { display: none; }
+    li.task > span::before { content: "[ ] "; font-family: inherit; }
+    li.task.done > span::before { content: "[x] "; }
   }
 </style>
 </head>
@@ -98,8 +109,52 @@ function getWordCount() {
   const text = document.getElementById('editor').innerText || '';
   return text.trim().split(/\s+/).filter(Boolean).length;
 }
+function syncTaskState(box) {
+  if (!box) return;
+  const li = box.closest('li.task');
+  if (box.checked) {
+    box.setAttribute('checked', '');
+    if (li) li.classList.add('done');
+  } else {
+    box.removeAttribute('checked');
+    if (li) li.classList.remove('done');
+  }
+}
+
 function setContent(html) {
+  window._loading = true;
   document.getElementById('editor').innerHTML = html || '<p></p>';
+  document.querySelectorAll('#editor li.task input[type=checkbox]').forEach(function(box) {
+    box.checked = box.checked || box.hasAttribute('checked');
+    syncTaskState(box);
+  });
+  window.monasteryDirty = false;
+  window._loading = false;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function insertChecklist() {
+  const sel = window.getSelection();
+  const raw = (sel && !sel.isCollapsed) ? sel.toString() : '';
+  const lines = raw.split(/\r?\n/).map(function(s) {
+    return s.replace(/^\s*[•\-\*]\s*/, '');
+  }).filter(function(s) { return s.length > 0; });
+  function item(inner) {
+    return '<li class="task"><input type="checkbox" contenteditable="false"><span>' + inner + '</span></li>';
+  }
+  let html;
+  if (lines.length) {
+    html = '<ul class="checklist">' + lines.map(function(l) {
+      return item(escapeHtml(l) || '&#8203;');
+    }).join('') + '</ul>';
+  } else {
+    html = '<ul class="checklist">' + item('&#8203;') + '</ul>';
+  }
+  document.execCommand('insertHTML', false, html);
+  if (!window._loading) window.monasteryDirty = true;
 }
 function execCommand(cmd, val) {
   document.execCommand(cmd, false, val);
@@ -143,24 +198,229 @@ function applyTheme(t) {
   }
 }
 
-function applyFontSize(pt) {
-  document.execCommand('styleWithCSS', false, true);
-  document.execCommand('fontSize', false, '7');
+function isFontSizeMarker(value) {
+  if (!value) return false;
+  const v = String(value).toLowerCase();
+  return v === 'xxx-large' || v === 'xx-large' || v === '7';
+}
+
+function containingBlock(node) {
   const editor = document.getElementById('editor');
+  let n = node;
+  if (n && n.nodeType === Node.TEXT_NODE)
+    n = n.parentElement;
+  while (n && n !== editor) {
+    const t = n.tagName;
+    if (t === 'P' || t === 'DIV' || t === 'H1' || t === 'H2' || t === 'H3' ||
+        t === 'H4' || t === 'H5' || t === 'H6' || t === 'LI' || t === 'TD')
+      return n;
+    n = n.parentElement;
+  }
+  return editor;
+}
+
+function topSelectionTargets() {
+  const editor = document.getElementById('editor');
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0)
+    return editor ? [containingBlock(editor)] : [];
+  const range = sel.getRangeAt(0);
+  if (range.collapsed)
+    return [containingBlock(range.startContainer)];
+  const hits = [];
+  const all = editor.querySelectorAll('*');
+  for (let i = 0; i < all.length; i++) {
+    const el = all[i];
+    try {
+      if (range.intersectsNode(el))
+        hits.push(el);
+    } catch (e) {}
+  }
+  return hits.filter(function(el) {
+    return !hits.some(function(other) {
+      return other !== el && other.contains(el);
+    });
+  });
+}
+
+function convertFontSizeMarkers(pt) {
+  const editor = document.getElementById('editor');
+  if (!editor) return;
   editor.querySelectorAll('font[size="7"]').forEach(function(fontEl) {
     const span = document.createElement('span');
     span.style.fontSize = pt + 'pt';
     while (fontEl.firstChild)
       span.appendChild(fontEl.firstChild);
-    fontEl.parentNode.replaceChild(span, fontEl);
+    if (fontEl.parentNode)
+      fontEl.parentNode.replaceChild(span, fontEl);
   });
+  editor.querySelectorAll('span, font').forEach(function(el) {
+    const inline = el.style ? el.style.fontSize : '';
+    const attr = el.getAttribute('size');
+    if (isFontSizeMarker(inline) || isFontSizeMarker(attr)) {
+      if (el.tagName === 'FONT') {
+        const span = document.createElement('span');
+        span.style.fontSize = pt + 'pt';
+        while (el.firstChild)
+          span.appendChild(el.firstChild);
+        if (el.parentNode)
+          el.parentNode.replaceChild(span, el);
+      } else {
+        el.style.fontSize = pt + 'pt';
+      }
+    }
+  });
+}
+
+function applyInlineToSelection(prop, value) {
+  const editor = document.getElementById('editor');
+  const targets = topSelectionTargets();
+  const cssName = (prop === 'fontSize') ? 'font-size' : 'font-family';
+  targets.forEach(function(el) {
+    if (!el || (editor && !editor.contains(el) && el !== editor))
+      return;
+    if (el === editor)
+      return;
+    el.style[prop] = value;
+    el.querySelectorAll('*').forEach(function(d) {
+      if (d.style && d.style[prop])
+        d.style.removeProperty(cssName);
+    });
+  });
+}
+
+function applyFontSize(pt) {
+  document.execCommand('styleWithCSS', false, true);
+  document.execCommand('fontSize', false, '7');
+  convertFontSizeMarkers(pt);
+  applyInlineToSelection('fontSize', pt + 'pt');
   window.monasteryDirty = true;
+}
+
+function applyFontFamily(name) {
+  document.execCommand('styleWithCSS', false, true);
+  document.execCommand('fontName', false, name);
+  applyInlineToSelection('fontFamily', name);
+  window.monasteryDirty = true;
+}
+
+function parseFontFamilyTokens(stack) {
+  const out = [];
+  const re = /"([^"]+)"|'([^']+)'|([^,]+)/g;
+  let m;
+  const s = String(stack || '');
+  while ((m = re.exec(s))) {
+    const t = (m[1] || m[2] || m[3] || '').trim();
+    if (t) out.push(t);
+  }
+  return out;
+}
+
+function isGenericOrSystemFont(name) {
+  const n = String(name || '').toLowerCase();
+  return n === 'serif' || n === 'sans-serif' || n === 'monospace' || n === 'cursive'
+    || n === 'fantasy' || n === 'system-ui' || n === 'ui-serif' || n === 'ui-sans-serif'
+    || n === 'ui-monospace' || n === 'ui-rounded' || n === 'emoji' || n === 'math'
+    || n === 'fangsong' || n === 'apple-system' || n === '-apple-system'
+    || n === 'blinkmacsystemfont';
+}
+
+function resolveUsedFamily(el, stack) {
+  const tokens = parseFontFamilyTokens(stack);
+  const named = tokens.filter(function(t) { return !isGenericOrSystemFont(t); });
+  const candidates = named.length ? named : tokens;
+  if (document.fonts && document.fonts.check && el) {
+    const size = (getComputedStyle(el).fontSize || '16px');
+    for (let i = 0; i < candidates.length; i++) {
+      try {
+        if (document.fonts.check(size + ' "' + candidates[i] + '"'))
+          return candidates[i];
+      } catch (e) {}
+    }
+  }
+  return candidates[0] || tokens[0] || '';
+}
+
+function cssSizeToPt(size) {
+  if (!size) return 0;
+  const s = String(size).trim();
+  const n = parseFloat(s);
+  if (!isFinite(n) || n <= 0) return 0;
+  if (/pt\s*$/i.test(s)) return Math.round(n);
+  if (/px\s*$/i.test(s)) return Math.round(n * 72 / 96);
+  return Math.round(n * 72 / 96);
+}
+
+function selectionFontElement() {
+  const editor = document.getElementById('editor');
+  const sel = window.getSelection();
+  if (sel && sel.anchorNode) {
+    let n = sel.anchorNode;
+    if (n.nodeType === Node.TEXT_NODE)
+      n = n.parentElement;
+    if (n && editor && (n === editor || editor.contains(n)))
+      return n;
+  }
+  return editor;
+}
+
+function styleProbeElement(el) {
+  if (!el || el.nodeType !== Node.ELEMENT_NODE)
+    return el;
+  if (el.style && (el.style.fontFamily || el.style.fontSize))
+    return el;
+  const inner = el.querySelector && el.querySelector('[style*="font-family"], [style*="font-size"]');
+  return inner || el;
+}
+
+function fontInfoFromElement(el) {
+  const info = { family: '', pt: 0 };
+  const probe = styleProbeElement(el);
+  if (!probe) return info;
+  try {
+    const cs = getComputedStyle(probe);
+    info.family = resolveUsedFamily(probe, cs.fontFamily);
+    info.pt = cssSizeToPt(cs.fontSize);
+  } catch (e) {}
+  if (!info.family) {
+    try {
+      const tokens = parseFontFamilyTokens(document.queryCommandValue('fontName') || '');
+      info.family = tokens[0] || '';
+    } catch (e) {}
+  }
+  return info;
+}
+
+function getSelectionFont() {
+  return fontInfoFromElement(selectionFontElement());
+}
+
+function getHeadingFont() {
+  const editor = document.getElementById('editor');
+  const heading = editor ? editor.querySelector('h1, h2, h3, h4, h5, h6') : null;
+  const probe = heading ? styleProbeElement(heading) : editor;
+  const info = fontInfoFromElement(probe);
+  info.found = !!heading;
+  if (probe && probe.nodeType === Node.ELEMENT_NODE) {
+    try {
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(probe);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    } catch (e) {}
+  }
+  const caret = fontInfoFromElement(selectionFontElement());
+  info.caretFamily = caret.family;
+  info.caretPt = caret.pt;
+  return info;
 }
 
 function sanitizePasted(root) {
   const allowed = {
     B:1, I:1, U:1, EM:1, STRONG:1, P:1, BR:1, DIV:1,
-    H1:1, H2:1, H3:1, BLOCKQUOTE:1, UL:1, OL:1, LI:1
+    H1:1, H2:1, H3:1, BLOCKQUOTE:1, UL:1, OL:1, LI:1, SPAN:1, INPUT:1,
+    TABLE:1, THEAD:1, TBODY:1, TFOOT:1, TR:1, TD:1, TH:1, COLGROUP:1, COL:1
   };
   const drop = { SCRIPT:1, STYLE:1, META:1, LINK:1, IMG:1, SVG:1, IFRAME:1 };
   const nodes = Array.from(root.childNodes);
@@ -175,6 +435,24 @@ function sanitizePasted(root) {
       node.remove();
       continue;
     }
+    if (node.tagName === 'INPUT') {
+      const type = (node.getAttribute('type') || '').toLowerCase();
+      if (type !== 'checkbox') {
+        node.remove();
+        continue;
+      }
+      const checked = node.checked || node.hasAttribute('checked');
+      while (node.attributes.length)
+        node.removeAttribute(node.attributes[0].name);
+      node.setAttribute('type', 'checkbox');
+      node.setAttribute('contenteditable', 'false');
+      if (checked)
+        node.setAttribute('checked', '');
+      continue;
+    }
+    const keepChecklist = node.tagName === 'UL' && node.classList.contains('checklist');
+    const keepTask = node.tagName === 'LI' && node.classList.contains('task');
+    const keepDone = keepTask && node.classList.contains('done');
     sanitizePasted(node);
     if (!allowed[node.tagName]) {
       const parent = node.parentNode;
@@ -182,17 +460,38 @@ function sanitizePasted(root) {
         parent.insertBefore(node.firstChild, node);
       parent.removeChild(node);
     } else {
+      const keepStyle = (node.tagName === 'SPAN' || node.tagName === 'TD' || node.tagName === 'TH'
+        || node.tagName === 'P' || node.tagName === 'H1' || node.tagName === 'H2' || node.tagName === 'H3'
+        || node.tagName === 'FONT') ? node.getAttribute('style') : null;
       while (node.attributes.length)
         node.removeAttribute(node.attributes[0].name);
+      if (keepStyle)
+        node.setAttribute('style', keepStyle);
+      if (keepChecklist)
+        node.className = 'checklist';
+      if (keepTask)
+        node.className = keepDone ? 'task done' : 'task';
     }
   }
 }
 
 (function setupEditor() {
   const ed = document.getElementById('editor');
-  const mark = function() { window.monasteryDirty = true; };
+  const mark = function() { if (!window._loading) window.monasteryDirty = true; };
   ed.addEventListener('input', mark);
   ed.addEventListener('keyup', mark);
+  ed.addEventListener('click', function(e) {
+    if (!e.target || !e.target.matches || !e.target.matches('input[type=checkbox]'))
+      return;
+    syncTaskState(e.target);
+    if (!window._loading) window.monasteryDirty = true;
+  });
+  ed.addEventListener('change', function(e) {
+    if (!e.target || !e.target.matches || !e.target.matches('input[type=checkbox]'))
+      return;
+    syncTaskState(e.target);
+    if (!window._loading) window.monasteryDirty = true;
+  });
   ed.addEventListener('paste', function(e) {
     if (!e.clipboardData) return;
     const html = e.clipboardData.getData('text/html');
