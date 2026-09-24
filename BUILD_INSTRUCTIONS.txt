@@ -1,0 +1,23 @@
+Monastery Qt6 WebEngine Upgrade - Build Instructions
+===================================================
+
+PREREQUISITES (run once):
+  sudo apt update
+  sudo apt install -y cmake ninja-build qt6-base-dev qt6-webengine-dev \
+                      libhunspell-dev qt6-multimedia-dev
+
+Then build:
+  rm -rf build
+  mkdir build && cd build
+  cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release
+  ninja -j$(nproc)
+
+Run:
+  ./Monastery
+
+Notes:
+- This enables the new QWebEngineView parchment editor.
+- The AppImage packaging scripts will need updates later to bundle WebEngine (larger binary).
+- Current changes: MonasteryEditor.cpp/.h + MonasteryFrame integration + CMake + editor.html
+
+If you get "Qt6WebEngineWidgets not found", the dev package above is missing.
