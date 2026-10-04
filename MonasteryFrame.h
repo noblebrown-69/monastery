@@ -71,7 +71,7 @@ private slots:
     void onToggleFocusMode();
     void maybeRestoreAutosave();
     void updateTitleBar();
-    void applyTheme(ThemeId id);
+    void applyTheme(ThemeId id, bool persist = true);
 
 
 private:
@@ -134,6 +134,7 @@ private:
     QComboBox *m_sizeCombo = nullptr;
     QStatusBar *m_statusBar = nullptr;
     QActionGroup *m_themeGroup = nullptr;
+    QAction *m_followBushidosAction = nullptr;
     Theme m_currentTheme;
 
     QPoint m_dragPosition;

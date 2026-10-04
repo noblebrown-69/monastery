@@ -628,10 +628,28 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent), m_currentThem
         m_themeGroup->addAction(action);
         const ThemeId id = th.themeId;
         connect(action, &QAction::triggered, this, [this, id](bool checked) {
-            if (checked)
+            if (checked) {
+                // A manual pick overrides "Follow BushidOS theme".
+                QSettings s(QStringLiteral("Monastery"), QStringLiteral("Monastery"));
+                s.setValue(QStringLiteral("followBushidos"), false);
+                if (m_followBushidosAction) {
+                    const QSignalBlocker b(m_followBushidosAction);
+                    m_followBushidosAction->setChecked(false);
+                }
                 applyTheme(id);
+            }
         });
     }
+    themeMenu->addSeparator();
+    m_followBushidosAction = themeMenu->addAction(QStringLiteral("Follow BushidOS theme"));
+    m_followBushidosAction->setCheckable(true);
+    m_followBushidosAction->setToolTip(QStringLiteral("Use BushidOS Neon automatically when the desktop theme is BushidOS-Neon"));
+    connect(m_followBushidosAction, &QAction::toggled, this, [this](bool on) {
+        QSettings s(QStringLiteral("Monastery"), QStringLiteral("Monastery"));
+        s.setValue(QStringLiteral("followBushidos"), on);
+        const ThemeId saved = themeIdFromString(s.value(QStringLiteral("theme"), QStringLiteral("leather")).toString());
+        applyTheme(on && bushidosNeonActive() ? ThemeId::Neon : saved, false);
+    });
 
     mainLayout->addWidget(m_menuBar);
 
@@ -733,7 +751,7 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent), m_currentThem
     });
     connect(m_editor, &MonasteryEditor::ready, this, [this](bool ok) {
         if (ok) {
-            applyTheme(m_currentTheme.themeId);
+            applyTheme(m_currentTheme.themeId, false);
             QTimer::singleShot(150, this, &MonasteryFrame::maybeRestoreAutosave);
         }
     });
@@ -815,7 +833,16 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent), m_currentThem
     updateWordCount();
 
     QSettings settings(QStringLiteral("Monastery"), QStringLiteral("Monastery"));
-    applyTheme(themeIdFromString(settings.value(QStringLiteral("theme"), QStringLiteral("leather")).toString()));
+    const bool followBushidos = settings.value(QStringLiteral("followBushidos"), true).toBool();
+    if (m_followBushidosAction) {
+        const QSignalBlocker blocker(m_followBushidosAction);
+        m_followBushidosAction->setChecked(followBushidos);
+    }
+    const ThemeId savedTheme = themeIdFromString(settings.value(QStringLiteral("theme"), QStringLiteral("leather")).toString());
+    if (followBushidos && bushidosNeonActive())
+        applyTheme(ThemeId::Neon, false);   // auto: never overwrite the saved manual theme
+    else
+        applyTheme(savedTheme);
 }
 
 MonasteryFrame::~MonasteryFrame() {
@@ -1890,6 +1917,8 @@ void MonasteryFrame::applyUiFont(const Theme &theme)
         ui.setFamilies({"IBM Plex Mono", "Fixed", "Courier New", "DejaVu Sans Mono", "sans-serif"});
     else if (theme.themeId == ThemeId::Leather)
         ui.setFamilies({"Noto Serif", "Georgia", "serif"});
+    else if (theme.themeId == ThemeId::Neon)
+        ui.setFamilies({"Noto Sans", "DejaVu Sans", "sans-serif"});
     else
         ui.setFamilies({"Courier New", "Liberation Mono", "DejaVu Sans Mono", "monospace"});
     ui.setPointSize(10);
@@ -1941,7 +1970,7 @@ void MonasteryFrame::colorizeToolbarIcons(const Theme &theme)
     m_checklistAction->setIcon(tinted(QStringLiteral(":/icons/checklist.png")));
 }
 
-void MonasteryFrame::applyTheme(ThemeId id)
+void MonasteryFrame::applyTheme(ThemeId id, bool persist)
 {
     const Theme t = themeForId(id);
     m_currentTheme = t;
@@ -1950,7 +1979,18 @@ void MonasteryFrame::applyTheme(ThemeId id)
     const QString chromeFg = t.pageAsObject ? t.pageBg : t.textOnChrome;
     const QString btnCss = QStringLiteral("border: none; background: transparent; color: %1;").arg(t.textOnChrome);
 
-    setStyleSheet(QStringLiteral("QWidget { background-color: %1; }").arg(t.chromeBg));
+    const QString neonQss = (t.themeId == ThemeId::Neon) ? neonExtraQss() : QString();
+    setStyleSheet(QStringLiteral("QWidget { background-color: %1; }").arg(t.chromeBg) + neonQss);
+    if (m_mdEdit) {
+        if (t.themeId == ThemeId::Neon)
+            m_mdEdit->setStyleSheet(QStringLiteral(
+                "QPlainTextEdit { background-color: #0f0d18; color: #ecebf7; border: none;"
+                " selection-background-color: #c0176e; selection-color: #ffffff; }"));
+        else
+            m_mdEdit->setStyleSheet(QStringLiteral(
+                "QPlainTextEdit { background-color: #1e1a17; color: #F5E8C7; border: none;"
+                " selection-background-color: #5C4A3F; }"));
+    }
 
     if (m_titleBar)
         m_titleBar->setStyleSheet(QStringLiteral("background-color: %1;").arg(t.chromeBg));
@@ -2031,6 +2071,7 @@ void MonasteryFrame::applyTheme(ThemeId id)
     dialogCss.replace(QStringLiteral("__SELBG__"), t.menuSelectedBg);
     dialogCss.replace(QStringLiteral("__SELFG__"), t.menuSelectedFg);
     dialogCss.replace(QStringLiteral("__CHROMEFG__"), chromeFg);
+    dialogCss += neonQss;
     qApp->setStyleSheet(dialogCss);
 
     colorizeToolbarIcons(t);
@@ -2050,8 +2091,10 @@ void MonasteryFrame::applyTheme(ThemeId id)
             QStringLiteral("var p = document.querySelector('.page'); if (p) p.style.padding = '%1';").arg(padding));
     }
 
-    QSettings settings(QStringLiteral("Monastery"), QStringLiteral("Monastery"));
-    settings.setValue(QStringLiteral("theme"), t.id);
+    if (persist) {
+        QSettings settings(QStringLiteral("Monastery"), QStringLiteral("Monastery"));
+        settings.setValue(QStringLiteral("theme"), t.id);
+    }
 }
 
 bool MonasteryFrame::isMarkdownSourcePath(const QString &path) const
