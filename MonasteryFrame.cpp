@@ -1,3 +1,4 @@
+#include <QPointer>
 #include "MonasteryFrame.h"
 #include "MonasteryEditor.h"
 #include "Theme.h"
@@ -819,8 +820,8 @@ MonasteryFrame::MonasteryFrame(QWidget *parent) : QWidget(parent), m_currentThem
 
     // Label refresh is callback-only; the editor polls JS without QEventLoop.
     m_wordCountPollTimer = new QTimer(this);
-    m_wordCountPollTimer->setInterval(900);
-    connect(m_wordCountPollTimer, &QTimer::timeout, this, &MonasteryFrame::updateWordCount);
+    m_wordCountPollTimer->setInterval(1500);
+    connect(m_wordCountPollTimer, &QTimer::timeout, this, [this]() { if (isMarkdownMode()) updateWordCount(); });  // lite: markdown only; rich-text count comes from wordCountChanged
     m_wordCountPollTimer->start();
 
     // Install event filter on child widgets for cursor updates
@@ -1693,23 +1694,27 @@ QString MonasteryFrame::waitForEditorHtml()
     QElapsedTimer clock;
     clock.start();
     while (clock.elapsed() < 8000) {
-        auto done = std::make_shared<bool>(false);
-        m_editor->fetchHtml([&](const QString &html) {
-            captured = html;
-            *done = true;
+        // UAF fix (WD crash 2026-10-30 18:15, Shoin+0x1d9b7 in this lambda):
+        // the callback used to capture `done`/`captured` by reference and could fire
+        // after this 400 ms wait (or the whole function) had returned, writing through
+        // a dead stack slot. Capture a shared state object by value instead.
+        struct HtmlWait { bool done = false; QString html; QPointer<QEventLoop> loop; };
+        auto st = std::make_shared<HtmlWait>();
+        m_editor->fetchHtml([st](const QString &html) {
+            st->html = html;
+            st->done = true;
+            if (st->loop)
+                st->loop->quit();
         });
-        if (!*done) {
+        if (!st->done) {
             QEventLoop loop;
-            QTimer pump;
-            pump.setInterval(15);
-            QObject::connect(&pump, &QTimer::timeout, [&]() {
-                if (*done)
-                    loop.quit();
-            });
-            pump.start();
+            st->loop = &loop;
             QTimer::singleShot(400, &loop, &QEventLoop::quit);
             loop.exec();
+            st->loop = nullptr;
         }
+        if (st->done)
+            captured = st->html;
         if (!htmlLooksEmpty(captured))
             return captured;
         QEventLoop pause;
